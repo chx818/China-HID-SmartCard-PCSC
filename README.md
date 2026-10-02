@@ -1,8 +1,9 @@
 # China-HID-SmartCard-PCSC (中国免驱 HID 智能卡读卡器 PC/SC 桥接驱动套件)
 
-> **Universal Windows PC/SC Bridges for Chinese Proprietary "Driverless" USB-HID Smart Card Readers**  
+> **Universal Windows & macOS PC/SC Bridges for Chinese Proprietary "Driverless" USB-HID Smart Card Readers**  
 > 专为国产“免驱 HID”智能卡读卡器打造的系统级 PC/SC 虚拟驱动映射工具箱。  
-> 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)** 等设备，将私有 HID 协议秒变 Windows 标准系统智能卡读卡器！
+> 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)** 等设备，将私有 HID 协议秒变标准系统智能卡读卡器！  
+> 🍎 **macOS 原生支持已全面上线！支持 Apple Silicon (M1~M4) 与 Intel，彻底摆脱 Windows DLL，详情请查看 [macOS 原生指引文档](README_MACOS.md)。**
 
 
 > **2026-10-06 德卡 T10 适配与体验优化更新**：

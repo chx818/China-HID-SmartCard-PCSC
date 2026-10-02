@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.class
 
 # Windows thumbnail and system cache
 Thumbs.db
@@ -40,3 +41,7 @@ T10_*.md
 *MERGE*.md
 *merge*.md
 
+# macOS build artifacts
+build_vpcd/
+*.dylib
+*.bundle
