@@ -208,17 +208,7 @@ public class FeitianSCR501Bridge {
             int ret = ft_dev_check_card(hDev, ref status);
             return (ret == 0 && status != 0);
         } else if (currentMedium == CardMedium.Contactless) {
-            byte[] probeApdu = new byte[] { 0x00, 0xC0, 0x00, 0x00, 0x00 };
-            byte[] probeResp = new byte[32];
-            int probeRlen = probeResp.Length;
-
-            int ret = ft_iso14443_4_command(hDev, probeApdu, probeApdu.Length, probeResp, ref probeRlen, 0);
-            if (ret == 0 && probeRlen >= 2) return true;
-
-            Thread.Sleep(80);
-            probeRlen = probeResp.Length;
-            ret = ft_iso14443_4_command(hDev, probeApdu, probeApdu.Length, probeResp, ref probeRlen, 0);
-            return (ret == 0 && probeRlen >= 2);
+            return true;
         }
         return false;
     }
@@ -350,10 +340,8 @@ public class FeitianSCR501Bridge {
                                         rlen = rapdu.Length;
                                         retApdu = ft_iso14443_4_command(hDev, payload, payload.Length, rapdu, ref rlen, 0);
                                         if (retApdu != 0 || rlen <= 0) {
-                                            if (!CheckCardStillPresent()) {
-                                                Console.WriteLine("[Bridge] Contactless card REMOVED during APDU! Disconnecting VPCD...");
-                                                throw new IOException("Card removed during APDU");
-                                            }
+                                            Console.WriteLine("[Bridge] Contactless card lost/removed during APDU!");
+                                            throw new IOException("Contactless card removed during APDU");
                                         }
                                     }
                                 } else if (currentMedium == CardMedium.Contact) {

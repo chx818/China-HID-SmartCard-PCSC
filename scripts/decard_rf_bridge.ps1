@@ -1,10 +1,8 @@
 # DeCard Dual-Interface T6 / T10 Contactless (ISO 14443 Type A / T=CL) PC/SC Bridge
-# Bridges DeCard T6 (VID_0471&PID_A112) Contactless Smart Card to Windows PC/SC via BixVReader (port 35963)
-# Uses dcic32.dll (32-bit x86 stdcall) with hardware T=CL framing, Chaining, and Cascade Level 2 support
+# Bridges DeCard T6 / T10 Contactless Smart Card to Windows PC/SC via BixVReader (port 35963)
+# Uses dcic32.dll (32-bit x86 stdcall) with hardware T=CL framing, Tx & Rx Chaining, and Cascade Level 2 support
 
 param(
-    [switch]$NoWatchdog,
-    [double]$IdleSeconds = 1.2,
     [string]$VpcdHost = "127.0.0.1",
     [int]$VpcdPort = 35963
 )
@@ -85,10 +83,6 @@ public class DecardT6RfBridge {
         0x3B, 0x8E, 0x80, 0x01, 0x80, 0x31, 0x80, 0x66, 0xB0, 0x84, 0x0C, 0x01, 0x6E, 0x01, 0x83, 0x00, 0x90, 0x00, 0x1D
     };
 
-    public static bool EnableWatchdog = true;
-    public static int IdleThresholdMs = 1200;
-    public static int ProbeIntervalMs = 800;
-
     public static byte[] BuildAtrFromAts(byte[] ats, int atslen) {
         if (ats == null || atslen < 2) return currentAtr;
         byte tl = ats[0];
@@ -167,87 +161,100 @@ public class DecardT6RfBridge {
         return false;
     }
 
-    public static byte[] TransmitApdu(byte[] apdu) {
-        MemoryStream fullResp = new MemoryStream();
-        byte pcb = (byte)(0x02 | (blockNum & 1));
-        byte[] frame = new byte[1 + apdu.Length];
-        frame[0] = pcb;
-        Array.Copy(apdu, 0, frame, 1, apdu.Length);
-
+    // Production ISO 14443-4 T=CL Transceiver with Full Tx & Rx Chaining
+    public static byte[] TransmitApdu(byte[] apdu, byte timeout = 10) {
+        int maxChunk = 250;
+        int offset = 0;
         byte respLen = 0;
         byte[] rawResp = new byte[256];
-        byte timeout = 0; // Fast response (~60ms) for snappy card detection/removal
-        short ret = IC_Pro_Commandsource(dev, (byte)frame.Length, frame, out respLen, rawResp, timeout);
 
-        if (ret != 0 || respLen < 1) {
-            return null;
+        // 1. Tx Phase: Chaining if APDU > maxChunk
+        while (offset < apdu.Length) {
+            int chunkLen = Math.Min(maxChunk, apdu.Length - offset);
+            bool isLast = (offset + chunkLen == apdu.Length);
+
+            byte pcb = (byte)((isLast ? 0x02 : 0x12) | (blockNum & 1));
+            byte[] frame = new byte[1 + chunkLen];
+            frame[0] = pcb;
+            Array.Copy(apdu, offset, frame, 1, chunkLen);
+
+            short ret = IC_Pro_Commandsource(dev, (byte)frame.Length, frame, out respLen, rawResp, timeout);
+            if (ret != 0 || respLen < 1) {
+                return null;
+            }
+
+            // Handle S(WTX) during Tx
+            while ((rawResp[0] & 0xF2) == 0xF2 && respLen >= 2) {
+                byte[] wtxFrame = new byte[] { rawResp[0], rawResp[1] };
+                ret = IC_Pro_Commandsource(dev, (byte)wtxFrame.Length, wtxFrame, out respLen, rawResp, timeout);
+                if (ret != 0 || respLen < 1) return null;
+            }
+
+            if (!isLast) {
+                // Expect R(ACK) block
+                byte rxPcb = rawResp[0];
+                if ((rxPcb & 0xF2) == 0xA2) {
+                    blockNum ^= 1;
+                    offset += chunkLen;
+                } else {
+                    return null;
+                }
+            } else {
+                offset += chunkLen;
+            }
         }
 
-        // Loop to handle WTX and Chaining
+        // 2. Rx Phase: Reassemble Response with Rx Chaining & WTX Handling
+        MemoryStream fullResp = new MemoryStream();
         while (true) {
             byte rxPcb = rawResp[0];
 
-            // 1. WTX (Waiting Time Extension) S-Block (PCB = 0xF2)
+            // WTX Request from card
             if ((rxPcb & 0xF2) == 0xF2 && respLen >= 2) {
-                byte[] wtxResp = new byte[] { 0xF2, rawResp[1] };
-                ret = IC_Pro_Commandsource(dev, (byte)wtxResp.Length, wtxResp, out respLen, rawResp, timeout);
+                byte[] wtxFrame = new byte[] { rxPcb, rawResp[1] };
+                short ret = IC_Pro_Commandsource(dev, (byte)wtxFrame.Length, wtxFrame, out respLen, rawResp, timeout);
                 if (ret != 0 || respLen < 1) return null;
                 continue;
             }
 
-            // 2. Chaining: Chaining bit 0x10 is set in I-Block
+            // Chained I-Block from card
             if ((rxPcb & 0x10) != 0) {
-                // Append payload (excluding PCB byte 0)
                 fullResp.Write(rawResp, 1, respLen - 1);
-                blockNum ^= 1; // Toggle block number
-
-                // Send R(ACK) block: 0xA2 | (next block number: 0 or 1)
+                blockNum ^= 1;
                 byte rAckPcb = (byte)(0xA2 | (blockNum & 1));
                 byte[] rAckFrame = new byte[] { rAckPcb };
-                ret = IC_Pro_Commandsource(dev, (byte)rAckFrame.Length, rAckFrame, out respLen, rawResp, timeout);
+                short ret = IC_Pro_Commandsource(dev, (byte)rAckFrame.Length, rAckFrame, out respLen, rawResp, timeout);
                 if (ret != 0 || respLen < 1) return null;
                 continue;
             }
 
-            // 3. Final block: Chaining bit is NOT set
+            // Final I-Block from card
             fullResp.Write(rawResp, 1, respLen - 1);
-            blockNum ^= 1; // Toggle block number for next transaction
+            blockNum ^= 1;
             break;
         }
 
         return fullResp.ToArray();
     }
 
-    public static bool CheckCardStillPresent() {
-        byte[] probeApdu = new byte[] { 0x00, 0xC0, 0x00, 0x00, 0x00 };
-        byte[] resp = TransmitApdu(probeApdu);
-        if (resp != null && resp.Length >= 2) return true;
-
-        Thread.Sleep(80);
-        resp = TransmitApdu(probeApdu);
-        return (resp != null && resp.Length >= 2);
-    }
-
     public static void StartBridge(string driverPath, string host, int port) {
-        Console.Title = "DeCard T6 Contactless (RF) PC/SC Bridge";
+        Console.Title = "DeCard Dual-Interface T6 / T10 Contactless (RF) PC/SC Bridge";
         Console.WriteLine("=============================================================");
-        Console.WriteLine("  DeCard T6 Dual-Interface Contactless Bridge (VPCD TCP " + port + ")");
-        Console.WriteLine("  Hardware : DeCard T6 (VID_0471&PID_A112) ISO 14443 Type A T=CL");
-        Console.WriteLine(string.Format("  Watchdog : {0} (Idle: {1}ms, Interval: {2}ms)", 
-            EnableWatchdog ? "ENABLED" : "DISABLED", IdleThresholdMs, ProbeIntervalMs));
+        Console.WriteLine("  DeCard T6 / T10 Contactless (RF) Bridge (VPCD TCP " + port + ")");
+        Console.WriteLine("  Hardware : DeCard T6 / T10 (VID_0471&PID_A112) ISO 14443-4 T=CL");
         Console.WriteLine("=============================================================\n");
 
         if (!string.IsNullOrEmpty(driverPath) && Directory.Exists(driverPath)) {
             SetDllDirectory(driverPath);
         }
 
-        Console.WriteLine("[Bridge] Connecting to DeCard T6 reader (Port 100)...");
+        Console.WriteLine("[Bridge] Connecting to DeCard reader via dcic32.dll (Port 100)...");
         bool printedWait = false;
         while (dev.ToInt64() <= 0) {
             dev = IC_InitCommAdvanced(100);
             if (dev.ToInt64() <= 0) {
                 if (!printedWait) {
-                    Console.WriteLine("[Bridge] Waiting for DeCard T6 (VID_0471&PID_A112) USB connection...");
+                    Console.WriteLine("[Bridge] Waiting for DeCard reader USB connection...");
                     printedWait = true;
                 }
                 Thread.Sleep(1000);
@@ -285,11 +292,9 @@ public class DecardT6RfBridge {
                         Thread.Sleep(500);
                     }
                 } else {
-                    Thread.Sleep(150);
+                    Thread.Sleep(50); // Snappy 50ms detection loop
                 }
             } else {
-                DateTime lastAppActivity = DateTime.Now;
-                DateTime lastProbeTime = DateTime.MinValue;
                 byte[] hdr = new byte[2];
 
                 try {
@@ -327,21 +332,19 @@ public class DecardT6RfBridge {
                                     ActivateRfCard();
                                 } else if (cmd == 2) { // WARM RESET
                                     Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Host requested WARM reset (cmd=2)", DateTime.Now));
-                                } else if (cmd == 0) { // POWER_OFF
-                                    // Ignored
                                 }
                             } else if (len > 1) {
-                                Console.WriteLine(string.Format("[APDU In  {0:HH:mm:ss.fff}] {1}", DateTime.Now, BitConverter.ToString(payload)));
-                                byte[] cardResp = TransmitApdu(payload);
+                                Console.WriteLine(string.Format("[APDU In  {0:HH:mm:ss.fff}] (len={1}) {2}", 
+                                    DateTime.Now, payload.Length, BitConverter.ToString(payload)));
+                                
+                                byte[] cardResp = TransmitApdu(payload, 10);
 
                                 if (cardResp == null || cardResp.Length < 2) {
                                     Thread.Sleep(20);
-                                    cardResp = TransmitApdu(payload);
+                                    cardResp = TransmitApdu(payload, 5);
                                     if (cardResp == null || cardResp.Length < 2) {
-                                        if (!CheckCardStillPresent()) {
-                                            Console.WriteLine("[Bridge] Contactless card REMOVED during APDU! Disconnecting VPCD...");
-                                            throw new IOException("Card removed during APDU");
-                                        }
+                                        Console.WriteLine("[Bridge] Contactless card lost/removed during APDU!");
+                                        throw new IOException("Contactless card removed during APDU");
                                     }
                                 }
 
@@ -359,28 +362,12 @@ public class DecardT6RfBridge {
                                     stream.Write(errResp, 0, 2);
                                     stream.Flush();
                                 }
-
-                                lastAppActivity = DateTime.Now;
                             }
                         } else {
                             if (client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available == 0) {
                                 throw new IOException("VPCD socket closed by host");
                             }
-
-                            if (EnableWatchdog) {
-                                double idleMs = (DateTime.Now - lastAppActivity).TotalMilliseconds;
-                                if (idleMs >= IdleThresholdMs) {
-                                    double sinceLastProbe = (DateTime.Now - lastProbeTime).TotalMilliseconds;
-                                    if (sinceLastProbe >= ProbeIntervalMs) {
-                                        lastProbeTime = DateTime.Now;
-                                        if (!CheckCardStillPresent()) {
-                                            Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Watchdog: Card physically removed! Disconnecting...", DateTime.Now));
-                                            throw new IOException("Card removed during idle");
-                                        }
-                                    }
-                                }
-                            }
-                            Thread.Sleep(15);
+                            Thread.Sleep(10);
                         }
                     }
                 } catch (Exception ex) {
@@ -392,7 +379,7 @@ public class DecardT6RfBridge {
                     cardPresent = false;
                     try { IC_ResetMifare(dev, 20); } catch {}
                     Console.WriteLine("[Bridge] >>> Card REMOVED. Windows PC/SC notified (EMPTY). Waiting for card... <<<\n");
-                    Thread.Sleep(200);
+                    Thread.Sleep(100);
                 }
             }
         }
@@ -401,14 +388,4 @@ public class DecardT6RfBridge {
 '@
 
 Add-Type -TypeDefinition $src
-
-if ($NoWatchdog) {
-    [DecardT6RfBridge]::EnableWatchdog = $false
-} else {
-    [DecardT6RfBridge]::EnableWatchdog = $true
-    if ($IdleSeconds -gt 0) {
-        [DecardT6RfBridge]::IdleThresholdMs = [int]($IdleSeconds * 1000)
-    }
-}
-
 [DecardT6RfBridge]::StartBridge($driverDir, $VpcdHost, $VpcdPort)

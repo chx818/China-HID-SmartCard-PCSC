@@ -7,9 +7,7 @@ param(
     [string]$VpcdHost = "127.0.0.1",
     [int]$VpcdPort = 35963,
     [ValidateSet("ContactFirst", "RfFirst")]
-    [string]$Priority = "ContactFirst",
-    [switch]$NoWatchdog,
-    [double]$IdleSeconds = 1.2
+    [string]$Priority = "ContactFirst"
 )
 
 # 1. Ensure 32-bit PowerShell for dcic32.dll x86 compatibility
@@ -28,6 +26,9 @@ if ([Environment]::Is64BitProcess) {
 # 2. Add driver directory to DLL search path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $driverDir = Join-Path (Split-Path -Parent $scriptDir) "drivers"
+if (-not (Test-Path (Join-Path $driverDir "dcic32.dll"))) {
+    $driverDir = Join-Path $scriptDir "drivers"
+}
 if (-not (Test-Path (Join-Path $driverDir "dcic32.dll"))) {
     $driverDir = $scriptDir
 }
@@ -109,9 +110,6 @@ public class DecardUnifiedBridge {
     private static byte rfBlockNum = 0;
     private static byte[] currentAtr = new byte[0];
 
-    public static bool EnableWatchdog = true;
-    public static int IdleThresholdMs = 1200;
-    public static int ProbeIntervalMs = 800;
     public static bool PreferContact = true;
 
     // Contact Card Helpers
@@ -199,7 +197,6 @@ public class DecardUnifiedBridge {
 
         byte finalSak = sak1;
 
-        // Cascade Level 2 for 7-byte / 10-byte UID cards (Bit 3, mask 0x04)
         if ((sak1 & 0x04) != 0) {
             uint snr2 = 0;
             short rAnti2 = IC_Anticoll2(dev, 0, out snr2);
@@ -212,7 +209,6 @@ public class DecardUnifiedBridge {
             finalSak = sak2;
         }
 
-        // ISO 14443-4 T=CL activation (Bit 6, mask 0x20)
         byte rlen = 0;
         byte[] atsBuf = new byte[128];
         short rPro = IC_Pro_Reset(dev, out rlen, atsBuf);
@@ -222,7 +218,6 @@ public class DecardUnifiedBridge {
             return true;
         }
 
-        // Fallback for storage cards without ATS (Mifare Classic / Plus SL1)
         if ((finalSak & 0x20) == 0) {
             currentAtr = new byte[] { 
                 0x3B, 0x8F, 0x80, 0x01, 0x80, 0x4F, 0x0C, 0xA0, 0x00, 0x00, 0x03, 0x06, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x68 
@@ -234,41 +229,74 @@ public class DecardUnifiedBridge {
         return false;
     }
 
+    // Production ISO 14443-4 T=CL Transceiver with Full Tx & Rx Chaining
     public static byte[] TransmitRfApdu(byte[] apdu, byte timeout = 10) {
-        MemoryStream fullResp = new MemoryStream();
-        byte pcb = (byte)(0x02 | (rfBlockNum & 1));
-        byte[] frame = new byte[1 + apdu.Length];
-        frame[0] = pcb;
-        Array.Copy(apdu, 0, frame, 1, apdu.Length);
-
+        int maxChunk = 250;
+        int offset = 0;
         byte respLen = 0;
         byte[] rawResp = new byte[256];
-        short ret = IC_Pro_Commandsource(dev, (byte)frame.Length, frame, out respLen, rawResp, timeout);
-        if (ret != 0 || respLen < 1) return null;
 
-        while (true) {
-            byte inPcb = rawResp[0];
+        // 1. Tx Phase: Chaining if APDU > maxChunk
+        while (offset < apdu.Length) {
+            int chunkLen = Math.Min(maxChunk, apdu.Length - offset);
+            bool isLast = (offset + chunkLen == apdu.Length);
 
-            // 1. S(WTX) Request
-            if ((inPcb & 0xF2) == 0xF2) {
-                byte[] wtxFrame = new byte[] { inPcb, (respLen > 1) ? rawResp[1] : (byte)1 };
+            byte pcb = (byte)((isLast ? 0x02 : 0x12) | (rfBlockNum & 1));
+            byte[] frame = new byte[1 + chunkLen];
+            frame[0] = pcb;
+            Array.Copy(apdu, offset, frame, 1, chunkLen);
+
+            short ret = IC_Pro_Commandsource(dev, (byte)frame.Length, frame, out respLen, rawResp, timeout);
+            if (ret != 0 || respLen < 1) {
+                return null;
+            }
+
+            // Handle S(WTX) during Tx
+            while ((rawResp[0] & 0xF2) == 0xF2 && respLen >= 2) {
+                byte[] wtxFrame = new byte[] { rawResp[0], rawResp[1] };
                 ret = IC_Pro_Commandsource(dev, (byte)wtxFrame.Length, wtxFrame, out respLen, rawResp, timeout);
+                if (ret != 0 || respLen < 1) return null;
+            }
+
+            if (!isLast) {
+                // Expect R(ACK) block
+                byte rxPcb = rawResp[0];
+                if ((rxPcb & 0xF2) == 0xA2) {
+                    rfBlockNum ^= 1;
+                    offset += chunkLen;
+                } else {
+                    return null;
+                }
+            } else {
+                offset += chunkLen;
+            }
+        }
+
+        // 2. Rx Phase: Reassemble Response with Rx Chaining & WTX Handling
+        MemoryStream fullResp = new MemoryStream();
+        while (true) {
+            byte rxPcb = rawResp[0];
+
+            // WTX Request from card
+            if ((rxPcb & 0xF2) == 0xF2 && respLen >= 2) {
+                byte[] wtxFrame = new byte[] { rxPcb, rawResp[1] };
+                short ret = IC_Pro_Commandsource(dev, (byte)wtxFrame.Length, wtxFrame, out respLen, rawResp, timeout);
                 if (ret != 0 || respLen < 1) return null;
                 continue;
             }
 
-            // 2. Chaining: Bit 4 (0x10) is set
-            if ((inPcb & 0x10) != 0) {
+            // Chained I-Block from card
+            if ((rxPcb & 0x10) != 0) {
                 fullResp.Write(rawResp, 1, respLen - 1);
                 rfBlockNum ^= 1;
                 byte rAckPcb = (byte)(0xA2 | (rfBlockNum & 1));
                 byte[] rAckFrame = new byte[] { rAckPcb };
-                ret = IC_Pro_Commandsource(dev, (byte)rAckFrame.Length, rAckFrame, out respLen, rawResp, timeout);
+                short ret = IC_Pro_Commandsource(dev, (byte)rAckFrame.Length, rAckFrame, out respLen, rawResp, timeout);
                 if (ret != 0 || respLen < 1) return null;
                 continue;
             }
 
-            // 3. Final block
+            // Final I-Block from card
             fullResp.Write(rawResp, 1, respLen - 1);
             rfBlockNum ^= 1;
             break;
@@ -277,29 +305,13 @@ public class DecardUnifiedBridge {
         return fullResp.ToArray();
     }
 
-    public static bool CheckCardStillPresent() {
-        if (activeMedium == CardMedium.Contact) {
-            return (IC_Status(dev) == 0);
-        } else if (activeMedium == CardMedium.Contactless) {
-            byte[] probeApdu = new byte[] { 0x00, 0xC0, 0x00, 0x00, 0x00 };
-            byte[] resp = TransmitRfApdu(probeApdu, 0);
-            if (resp != null && resp.Length >= 2) return true;
-            Thread.Sleep(80);
-            resp = TransmitRfApdu(probeApdu, 0);
-            return (resp != null && resp.Length >= 2);
-        }
-        return false;
-    }
-
     public static void StartBridge(string driverPath, string host, int port) {
         Console.Title = "DeCard Dual-Interface (T6 / T10) Unified PC/SC Bridge";
         Console.WriteLine("=============================================================");
         Console.WriteLine("  DeCard Unified Dual-Interface Bridge (VPCD TCP " + port + ")");
         Console.WriteLine("  Hardware : DeCard T6 / T10 (VID_0471&PID_A112)");
         Console.WriteLine("  Channels : Contact (ISO 7816) + Contactless RF (ISO 14443-4)");
-        Console.WriteLine(string.Format("  Priority : {0} | Watchdog: {1}", 
-            PreferContact ? "Contact First" : "Contactless First",
-            EnableWatchdog ? "ENABLED" : "DISABLED"));
+        Console.WriteLine(string.Format("  Priority : {0}", PreferContact ? "Contact First" : "Contactless First"));
         Console.WriteLine("=============================================================\n");
 
         if (!string.IsNullOrEmpty(driverPath) && Directory.Exists(driverPath)) {
@@ -338,7 +350,6 @@ public class DecardUnifiedBridge {
                 bool detected = false;
 
                 if (PreferContact) {
-                    // Try Contact first, then Contactless
                     if (ActivateContactCard()) {
                         activeMedium = CardMedium.Contact;
                         detected = true;
@@ -347,7 +358,6 @@ public class DecardUnifiedBridge {
                         detected = true;
                     }
                 } else {
-                    // Try Contactless first, then Contact
                     if (ActivateRfCard()) {
                         activeMedium = CardMedium.Contactless;
                         detected = true;
@@ -371,11 +381,10 @@ public class DecardUnifiedBridge {
                         Thread.Sleep(500);
                     }
                 } else {
-                    Thread.Sleep(120);
+                    Thread.Sleep(50); // Snappy 50ms detection loop
                 }
             } else {
-                DateTime lastAppActivity = DateTime.Now;
-                DateTime lastProbeTime = DateTime.MinValue;
+                DateTime lastContactPoll = DateTime.Now;
                 byte[] hdr = new byte[2];
 
                 try {
@@ -425,30 +434,31 @@ public class DecardUnifiedBridge {
                                             ActivateRfCard();
                                         }
                                     }
-                                    lastAppActivity = DateTime.Now;
                                 }
                             } else {
-                                Console.WriteLine(string.Format("[APDU In  {0:HH:mm:ss.fff}] [{1}] {2}", 
-                                    DateTime.Now, activeMedium, BitConverter.ToString(payload)));
+                                Console.WriteLine(string.Format("[APDU In  {0:HH:mm:ss.fff}] [{1}] (len={2}) {3}", 
+                                    DateTime.Now, activeMedium, payload.Length, BitConverter.ToString(payload)));
 
                                 byte[] cardResp = null;
                                 if (activeMedium == CardMedium.Contact) {
                                     cardResp = TransmitContactApdu(payload);
                                 } else if (activeMedium == CardMedium.Contactless) {
-                                    cardResp = TransmitRfApdu(payload);
+                                    cardResp = TransmitRfApdu(payload, 10);
                                 }
 
                                 if (cardResp == null || cardResp.Length < 2) {
                                     Thread.Sleep(20);
                                     if (activeMedium == CardMedium.Contact) {
                                         cardResp = TransmitContactApdu(payload);
+                                        if (cardResp == null && IC_Status(dev) != 0) {
+                                            Console.WriteLine("[Bridge] Contact card REMOVED during APDU!");
+                                            throw new IOException("Contact card removed during APDU");
+                                        }
                                     } else if (activeMedium == CardMedium.Contactless) {
-                                        cardResp = TransmitRfApdu(payload);
-                                    }
-                                    if (cardResp == null || cardResp.Length < 2) {
-                                        if (!CheckCardStillPresent()) {
-                                            Console.WriteLine(string.Format("[Bridge] {0} card REMOVED during APDU!", activeMedium));
-                                            throw new IOException("Card removed during APDU");
+                                        cardResp = TransmitRfApdu(payload, 5);
+                                        if (cardResp == null) {
+                                            Console.WriteLine("[Bridge] Contactless card lost/removed during APDU!");
+                                            throw new IOException("Contactless card lost/removed during APDU");
                                         }
                                     }
                                 }
@@ -468,29 +478,24 @@ public class DecardUnifiedBridge {
                                     stream.Write(errResp, 0, 2);
                                     stream.Flush();
                                 }
-
-                                lastAppActivity = DateTime.Now;
                             }
                         } else {
                             if (client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available == 0) {
                                 throw new IOException("VPCD socket closed by host");
                             }
 
-                            if (EnableWatchdog) {
-                                double idleMs = (DateTime.Now - lastAppActivity).TotalMilliseconds;
-                                if (idleMs >= IdleThresholdMs) {
-                                    double sinceLastProbe = (DateTime.Now - lastProbeTime).TotalMilliseconds;
-                                    if (sinceLastProbe >= ProbeIntervalMs) {
-                                        lastProbeTime = DateTime.Now;
-                                        if (!CheckCardStillPresent()) {
-                                            Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Watchdog: [{1}] card physically removed!", 
-                                                DateTime.Now, activeMedium));
-                                            throw new IOException("Card removed during idle");
-                                        }
+                            // Contact slot physical microswitch monitoring
+                            if (activeMedium == CardMedium.Contact) {
+                                if ((DateTime.Now - lastContactPoll).TotalMilliseconds >= 250) {
+                                    lastContactPoll = DateTime.Now;
+                                    if (IC_Status(dev) != 0) {
+                                        Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Contact card physically pulled from slot!", DateTime.Now));
+                                        throw new IOException("Contact card removed");
                                     }
                                 }
                             }
-                            Thread.Sleep(15);
+
+                            Thread.Sleep(10);
                         }
                     }
                 } catch (Exception ex) {
@@ -504,7 +509,7 @@ public class DecardUnifiedBridge {
                     try { IC_ResetMifare(dev, 20); } catch {}
                     Console.WriteLine(string.Format("[Bridge] >>> [{0} CARD REMOVED]. Windows PC/SC notified (EMPTY). Waiting for card... <<<\n", 
                         removedMedium.ToString().ToUpper()));
-                    Thread.Sleep(200);
+                    Thread.Sleep(100);
                 }
             }
         }
@@ -513,15 +518,6 @@ public class DecardUnifiedBridge {
 '@
 
 Add-Type -TypeDefinition $src
-
-if ($NoWatchdog) {
-    [DecardUnifiedBridge]::EnableWatchdog = $false
-} else {
-    [DecardUnifiedBridge]::EnableWatchdog = $true
-    if ($IdleSeconds -gt 0) {
-        [DecardUnifiedBridge]::IdleThresholdMs = [int]($IdleSeconds * 1000)
-    }
-}
 
 if ($Priority -eq "RfFirst") {
     [DecardUnifiedBridge]::PreferContact = $false
