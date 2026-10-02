@@ -125,22 +125,48 @@ class DeCardHIDDriver:
         return st == 0 and len(payload) > 0 and payload[0] in (0x82, 0x86)
 
     def contact_reset(self, slot: int = 0) -> Optional[bytes]:
-        """CPU Reset: Opcode 0xA3. Returns card ATR."""
-        cmd = bytes([0x21, 0xA3, (slot & 0x0F) << 4, 0x00])
-        st, payload = self._send_cmd(cmd)
-        if st == 0 and len(payload) >= 2:
-            atr_len = payload[1]
-            return payload[2:2 + atr_len]
+        """CPU Reset: Opcode 0x54 + 0x43. Returns card ATR."""
+        self._send_cmd(bytes([0x54, 0x0C + (slot & 0x0F)]))
+        st, payload = self._send_cmd(bytes([0x43, slot & 0x0F]))
+        if st == 0 and payload and len(payload) >= 1:
+            atr_len = payload[0]
+            if len(payload) >= 1 + atr_len and atr_len > 0:
+                return payload[1:1 + atr_len]
         return None
 
-    def contact_transmit_apdu(self, apdu: bytes, slot: int = 0) -> Optional[bytes]:
-        """Transmit APDU to Contact Smart Card (Opcode 0xA4)."""
-        cmd = bytes([0x21, 0xA4, (slot & 0x0F) << 4, len(apdu) & 0xFF]) + apdu
+    def contact_transmit_apdu(self, apdu: bytes, slot: int = 0, auto_t0: bool = True) -> Optional[bytes]:
+        """
+        Transmit APDU to Contact Smart Card (Opcode 0x41).
+        Supports automatic T=0 6C (Le re-issue) and 61 (GET RESPONSE) handling.
+        """
+        cmd = bytes([0x41, slot & 0x0F, 0x00]) + apdu
         st, payload = self._send_cmd(cmd)
-        if st == 0 and len(payload) >= 2:
-            rlen = payload[1]
-            return payload[2:2 + rlen]
-        return None
+        if st != 0 or not payload or len(payload) < 1:
+            return None
+
+        rlen = payload[0]
+        data = payload[1:1 + rlen]
+
+        if auto_t0 and len(data) == 2:
+            # 1. SW = 0x6C XX: Wrong length Le -> re-issue with Le = XX
+            if data[0] == 0x6C and len(apdu) >= 5:
+                reissued_apdu = apdu[:-1] + bytes([data[1]])
+                cmd = bytes([0x41, slot & 0x0F, 0x00]) + reissued_apdu
+                st, payload = self._send_cmd(cmd)
+                if st == 0 and payload and len(payload) >= 1:
+                    rlen = payload[0]
+                    data = payload[1:1 + rlen]
+
+            # 2. SW = 0x61 XX: Response available -> fetch via GET RESPONSE (00 C0 00 00 XX)
+            if len(data) == 2 and data[0] == 0x61:
+                get_resp = bytes([0x00, 0xC0, 0x00, 0x00, data[1]])
+                cmd = bytes([0x41, slot & 0x0F, 0x00]) + get_resp
+                st, payload = self._send_cmd(cmd)
+                if st == 0 and payload and len(payload) >= 1:
+                    rlen = payload[0]
+                    data = payload[1:1 + rlen]
+
+        return data
 
     # ========================================================
     # Contactless RF (ISO 14443-4 Type A / T=CL) Methods

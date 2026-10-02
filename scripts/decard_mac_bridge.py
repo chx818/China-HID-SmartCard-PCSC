@@ -239,6 +239,28 @@ class DecardMacBridge:
                     if cmd == 4:  # VPCD_CTRL_ATR
                         self.log("Ctrl", "Host requested ATR")
                         with self.lock:
+                            if self.active_medium == "None" and not self.use_mock:
+                                if self.priority == "ContactFirst":
+                                    if self.driver.contact_check_status():
+                                        atr = self.driver.contact_reset()
+                                        if atr:
+                                            self.active_medium = "Contact"
+                                            self.current_atr = atr
+                                    if self.active_medium == "None":
+                                        ok, atr = self.driver.activate_rf_card()
+                                        if ok and atr:
+                                            self.active_medium = "Contactless"
+                                            self.current_atr = atr
+                                else:
+                                    ok, atr = self.driver.activate_rf_card()
+                                    if ok and atr:
+                                        self.active_medium = "Contactless"
+                                        self.current_atr = atr
+                                    elif self.driver.contact_check_status():
+                                        atr = self.driver.contact_reset()
+                                        if atr:
+                                            self.active_medium = "Contact"
+                                            self.current_atr = atr
                             if self.active_medium != "None" and self.current_atr:
                                 resp_hdr = len(self.current_atr).to_bytes(2, "big")
                                 client_sock.sendall(resp_hdr + self.current_atr)
@@ -254,12 +276,18 @@ class DecardMacBridge:
                             elif self.active_medium == "Contactless":
                                 self.driver.rf_reset_field(20)
                                 self.driver.activate_rf_card()
+                            elif self.active_medium == "Contact":
+                                atr = self.driver.contact_reset()
+                                if atr:
+                                    self.current_atr = atr
 
                     elif cmd == 0:  # POWER_DOWN
                         self.log("Ctrl", "Host requested POWER_DOWN")
                         with self.lock:
                             if not self.use_mock and self.active_medium == "Contactless":
                                 self.driver.rf_reset_field(10)
+                            elif not self.use_mock and self.active_medium == "Contact":
+                                self.driver._send_cmd(bytes([0x54, 0x7F]))
                             self.active_medium = "None"
 
                 else:
