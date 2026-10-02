@@ -77,7 +77,7 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 | :--- | :--- | :--- | :--- |
 | **`start_decard_unified.bat`**<br>**(🔥 强烈推荐首选)** | 德卡 T6 双界面<br>德卡 T10<br>德卡 T6 单界面 | **二合一智能感知**<br>(接触 + 非接触) | **日常使用首选！单脚本自动处理所有情况**：<br>• 插卡即走接触式，碰卡即走非接区，自由选择无需换脚本。<br>• **长耗时运算免断联**：业务 APDU 支持 2.5 秒计算等待，完美运行 **FIDO2 / WebAuthn Passkey 网页验证**、**OpenPGP 密钥解密/签名**、**PIV 证书登录**。<br>• **毫秒级看门狗**：看门狗探针轻量化，放卡/拿卡 150ms 极速响应，手感极其丝滑！ |
 | **`start_decard_rf.bat`** | 德卡 T6 双界面<br>德卡 T10 非接区 | 独立非接触 (RF)<br>(ISO 14443-4 T=CL) | 专用于只想挥非接卡/安全 Key 的场景，轻量独立，不占用接触式资源。 |
-| **`start_decard_t6_contact.bat`** | 德卡 T6 单界面<br>(或双界面接触座) | 独立接触式 (Contact)<br>(ISO 7816-3 T=0) | 专用于纯插卡环境。利用物理微动开关硬件检测，金手指持续恒定供电。特别适合在 JavaCard 上生成 **RSA-4096 / Ed25519** 等大耗时密钥，永不断电掉场。 |
+| **`start_decard_contact.bat`** | 德卡 T6 单界面 / 双界面<br>德卡 T10 接触槽 | 独立接触式 (Contact)<br>(ISO 7816-3 T=0) | 专用于纯插卡环境（T6 与 T10 通用）。利用物理微动开关硬件检测，金手指持续恒定供电。特别适合在 JavaCard 上生成 **RSA-4096 / Ed25519** 等大耗时密钥，永不断电掉场。 |
 | **`start_feitian_scr501.bat`** | 飞天 SCR501<br>(ROCKEY 531) | 专用非接触中继<br>(`RK501API.dll`) | **⚠️ 明确说明：目前仅实现非接触（挥卡）界面可用！**<br>基于飞天诚信官方动态库，内置防掉卡去抖看门狗，稳定读取各类非接 CPU 卡、JavaCard 与 FIDO Key。 |
 | **`test_gp.bat`** | 通用诊断 | GlobalPlatformPro | 自动探测并调用 `gp.exe` 连通 `Virtual PCD`，打印卡片内的安全域、AID 与 Applet 列表，一键测试链路是否畅通。 |
 
@@ -160,7 +160,7 @@ SmartCard-Bridges/
 ├── LICENSE                        # MIT 开源许可证
 ├── start_decard_unified.bat       # 🔥 德卡 T6/T10 接触+非接 二合一智能桥接
 ├── start_decard_rf.bat            # 德卡双界面 / T10 非接触 (RF) 独立桥接
-├── start_decard_t6_contact.bat    # 德卡 T6 纯接触式卡座独立桥接
+├── start_decard_contact.bat       # 德卡 T6 / T10 接触式卡座独立桥接
 ├── start_feitian_scr501.bat       # 飞天诚信 SCR501 (ROCKEY 531) 专用桥接
 ├── test_gp.bat                    # GlobalPlatformPro 连通性快速验证
 │
@@ -176,7 +176,7 @@ SmartCard-Bridges/
 ├── scripts/                       # 核心业务逻辑 PowerShell 脚本
 │   ├── decard_unified_bridge.ps1  # 德卡接触/非接 二合一中继逻辑
 │   ├── decard_rf_bridge.ps1       # 德卡非接独立中继逻辑
-│   ├── decard_t6_contact_bridge.ps1 # 德卡 T6 纯接触独立中继逻辑
+│   ├── decard_contact_bridge.ps1  # 德卡接触式独立中继逻辑 (T6 / T10 通用)
 │   └── feitian_scr501_bridge.ps1  # 飞天 SCR501 独立中继逻辑
 │
 └── tools/                         # 协议分析逆向与辅助工具

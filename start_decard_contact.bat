@@ -1,12 +1,12 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title [DeCard T6] Contact Smart Card PC/SC Bridge
+title [DeCard T6 / T10] Contact Smart Card PC/SC Bridge
 
 set "PATH=%~dp0drivers;%PATH%"
 
 echo ===============================================================
-echo   DeCard T6 (VID_0471^&PID_A112) Contact Smart Card Bridge
+echo   DeCard T6 / T10 Contact Smart Card Bridge
 echo   Connecting to BixVReader / VPCD on 127.0.0.1:35963
 echo ===============================================================
 echo.
@@ -16,7 +16,7 @@ if exist "%SystemRoot%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" (
     set "POWERSHELL_BIN=%SystemRoot%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
 )
 
-"%POWERSHELL_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\decard_t6_contact_bridge.ps1" %*
+"%POWERSHELL_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\decard_contact_bridge.ps1" %*
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

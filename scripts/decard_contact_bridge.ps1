@@ -1,4 +1,4 @@
-# DeCard T6 (VID_0471&PID_A112) Contact Smart Card PC/SC Bridge
+# DeCard T6 / T10 Contact Smart Card PC/SC Bridge
 # Connects to BixVReader / VPCD via TCP Port 35963
 
 param(
@@ -64,22 +64,22 @@ public class DecardT6ContactBridge {
 
     public static void StartBridge(string driverPath, string host, int port) {
         Console.WriteLine("=============================================================");
-        Console.WriteLine("  DeCard T6 Contact Smart Card Bridge (VPCD TCP " + port + ")");
-        Console.WriteLine("  Hardware : DeCard T6 (VID_0471&PID_A112) ISO 7816-3 T=0");
+        Console.WriteLine("  DeCard T6 / T10 Contact Smart Card Bridge (VPCD TCP " + port + ")");
+        Console.WriteLine("  Hardware : DeCard T6 / T10 ISO 7816-3 T=0 Contact Interface");
         Console.WriteLine("=============================================================");
 
         if (!string.IsNullOrEmpty(driverPath) && Directory.Exists(driverPath)) {
             SetDllDirectory(driverPath);
         }
 
-        Console.WriteLine("\n[Bridge] Connecting to DeCard T6 via dcic32.dll (Port 100)...");
+        Console.WriteLine("\n[Bridge] Connecting to DeCard reader via dcic32.dll (Port 100)...");
         IntPtr dev = IntPtr.Zero;
         bool printedWait = false;
         while (dev.ToInt64() <= 0) {
             dev = IC_InitCommAdvanced(100);
             if (dev.ToInt64() <= 0) {
                 if (!printedWait) {
-                    Console.WriteLine("[Bridge] Waiting for DeCard T6 (VID_0471&PID_A112) USB connection...");
+                    Console.WriteLine("[Bridge] Waiting for DeCard (T6 / T10) USB connection...");
                     printedWait = true;
                 }
                 Thread.Sleep(1000);
