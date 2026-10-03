@@ -109,6 +109,7 @@ public class DecardUnifiedBridge {
     private static CardMedium activeMedium = CardMedium.None;
     private static byte rfBlockNum = 0;
     private static byte[] currentAtr = new byte[0];
+    private static bool isCpuCard = false;
 
     public static bool PreferContact = true;
 
@@ -215,6 +216,7 @@ public class DecardUnifiedBridge {
         if (rPro == 0 && rlen > 0) {
             currentAtr = BuildAtrFromAts(atsBuf, rlen);
             rfBlockNum = 0;
+            isCpuCard = true;
             return true;
         }
 
@@ -223,10 +225,41 @@ public class DecardUnifiedBridge {
                 0x3B, 0x8F, 0x80, 0x01, 0x80, 0x4F, 0x0C, 0xA0, 0x00, 0x00, 0x03, 0x06, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x68 
             };
             rfBlockNum = 0;
+            isCpuCard = false;
             return true;
         }
 
+        IC_ResetMifare(dev, 10);
         return false;
+    }
+
+    public static bool CheckRfCardPresent() {
+        if (isCpuCard) {
+            byte emptyPcb = (byte)(0x02 | (rfBlockNum & 1));
+            byte rlen = 0;
+            byte[] rbuf = new byte[64];
+            short ret = IC_Pro_Commandsource(dev, 1, new byte[] { emptyPcb }, out rlen, rbuf, 2);
+            if (ret == 0 && rlen >= 1) {
+                rfBlockNum ^= 1;
+                return true;
+            }
+            // Debounce once after 40ms to avoid transient RF disturbance
+            Thread.Sleep(40);
+            emptyPcb = (byte)(0x02 | (rfBlockNum & 1));
+            ret = IC_Pro_Commandsource(dev, 1, new byte[] { emptyPcb }, out rlen, rbuf, 2);
+            if (ret == 0 && rlen >= 1) {
+                rfBlockNum ^= 1;
+                return true;
+            }
+            return false;
+        } else {
+            ushort tagType = 0;
+            short r = IC_Request(dev, 1, out tagType);
+            if (r == 0) return true;
+            Thread.Sleep(40);
+            r = IC_Request(dev, 1, out tagType);
+            return (r == 0);
+        }
     }
 
     // Production ISO 14443-4 T=CL Transceiver with Full Tx & Rx Chaining
@@ -385,11 +418,14 @@ public class DecardUnifiedBridge {
                 }
             } else {
                 DateTime lastContactPoll = DateTime.Now;
+                DateTime lastRfPoll = DateTime.Now;
+                DateTime lastActivity = DateTime.Now;
                 byte[] hdr = new byte[2];
 
                 try {
                     while (activeMedium != CardMedium.None) {
                         if (stream.DataAvailable) {
+                            lastActivity = DateTime.Now;
                             int read = 0;
                             while (read < 2) {
                                 int r = stream.Read(hdr, read, 2 - read);
@@ -428,11 +464,9 @@ public class DecardUnifiedBridge {
                                             Array.Copy(atrBuf, currentAtr, rlen);
                                         }
                                     } else if (activeMedium == CardMedium.Contactless) {
-                                        if (cmd == 1) {
-                                            IC_ResetMifare(dev, 20);
-                                            Thread.Sleep(30);
-                                            ActivateRfCard();
-                                        }
+                                        IC_ResetMifare(dev, 20);
+                                        Thread.Sleep(30);
+                                        ActivateRfCard();
                                     }
                                 }
                             } else {
@@ -479,18 +513,31 @@ public class DecardUnifiedBridge {
                                     stream.Flush();
                                 }
                             }
+                            lastActivity = DateTime.Now;
                         } else {
                             if (client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available == 0) {
                                 throw new IOException("VPCD socket closed by host");
                             }
 
+                            DateTime now = DateTime.Now;
+
                             // Contact slot physical microswitch monitoring
                             if (activeMedium == CardMedium.Contact) {
-                                if ((DateTime.Now - lastContactPoll).TotalMilliseconds >= 250) {
-                                    lastContactPoll = DateTime.Now;
+                                if ((now - lastContactPoll).TotalMilliseconds >= 250) {
+                                    lastContactPoll = now;
                                     if (IC_Status(dev) != 0) {
-                                        Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Contact card physically pulled from slot!", DateTime.Now));
+                                        Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Contact card physically pulled from slot!", now));
                                         throw new IOException("Contact card removed");
+                                    }
+                                }
+                            }
+                            // Contactless RF field presence monitoring
+                            else if (activeMedium == CardMedium.Contactless) {
+                                if ((now - lastActivity).TotalMilliseconds >= 400 && (now - lastRfPoll).TotalMilliseconds >= 400) {
+                                    lastRfPoll = now;
+                                    if (!CheckRfCardPresent()) {
+                                        Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Contactless card removed from RF field!", now));
+                                        throw new IOException("Contactless card removed");
                                     }
                                 }
                             }
@@ -506,6 +553,7 @@ public class DecardUnifiedBridge {
                     stream = null;
                     CardMedium removedMedium = activeMedium;
                     activeMedium = CardMedium.None;
+                    isCpuCard = false;
                     try { IC_ResetMifare(dev, 20); } catch {}
                     Console.WriteLine(string.Format("[Bridge] >>> [{0} CARD REMOVED]. Windows PC/SC notified (EMPTY). Waiting for card... <<<\n", 
                         removedMedium.ToString().ToUpper()));

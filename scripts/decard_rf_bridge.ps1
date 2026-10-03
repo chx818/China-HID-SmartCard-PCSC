@@ -79,6 +79,7 @@ public class DecardT6RfBridge {
 
     private static IntPtr dev = IntPtr.Zero;
     private static byte blockNum = 0;
+    private static bool isCpuCard = false;
     private static byte[] currentAtr = new byte[] {
         0x3B, 0x8E, 0x80, 0x01, 0x80, 0x31, 0x80, 0x66, 0xB0, 0x84, 0x0C, 0x01, 0x6E, 0x01, 0x83, 0x00, 0x90, 0x00, 0x1D
     };
@@ -146,6 +147,7 @@ public class DecardT6RfBridge {
         if (rPro == 0 && rlen > 0) {
             currentAtr = BuildAtrFromAts(atsBuf, rlen);
             blockNum = 0;
+            isCpuCard = true;
             return true;
         }
 
@@ -155,10 +157,41 @@ public class DecardT6RfBridge {
                 0x3B, 0x8F, 0x80, 0x01, 0x80, 0x4F, 0x0C, 0xA0, 0x00, 0x00, 0x03, 0x06, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x68 
             };
             blockNum = 0;
+            isCpuCard = false;
             return true;
         }
 
+        IC_ResetMifare(dev, 10);
         return false;
+    }
+
+    public static bool CheckRfCardPresent() {
+        if (isCpuCard) {
+            byte emptyPcb = (byte)(0x02 | (blockNum & 1));
+            byte rlen = 0;
+            byte[] rbuf = new byte[64];
+            short ret = IC_Pro_Commandsource(dev, 1, new byte[] { emptyPcb }, out rlen, rbuf, 2);
+            if (ret == 0 && rlen >= 1) {
+                blockNum ^= 1;
+                return true;
+            }
+            // Debounce once after 40ms to avoid transient RF disturbance
+            Thread.Sleep(40);
+            emptyPcb = (byte)(0x02 | (blockNum & 1));
+            ret = IC_Pro_Commandsource(dev, 1, new byte[] { emptyPcb }, out rlen, rbuf, 2);
+            if (ret == 0 && rlen >= 1) {
+                blockNum ^= 1;
+                return true;
+            }
+            return false;
+        } else {
+            ushort tagType = 0;
+            short r = IC_Request(dev, 1, out tagType);
+            if (r == 0) return true;
+            Thread.Sleep(40);
+            r = IC_Request(dev, 1, out tagType);
+            return (r == 0);
+        }
     }
 
     // Production ISO 14443-4 T=CL Transceiver with Full Tx & Rx Chaining
@@ -295,11 +328,14 @@ public class DecardT6RfBridge {
                     Thread.Sleep(50); // Snappy 50ms detection loop
                 }
             } else {
+                DateTime lastRfPoll = DateTime.Now;
+                DateTime lastActivity = DateTime.Now;
                 byte[] hdr = new byte[2];
 
                 try {
                     while (cardPresent) {
                         if (stream.DataAvailable) {
+                            lastActivity = DateTime.Now;
                             int read = 0;
                             while (read < 2) {
                                 int r = stream.Read(hdr, read, 2 - read);
@@ -325,13 +361,12 @@ public class DecardT6RfBridge {
                                     stream.Write(respHdr, 0, 2);
                                     stream.Write(currentAtr, 0, currentAtr.Length);
                                     stream.Flush();
-                                } else if (cmd == 1) { // COLD RESET / POWER_ON
-                                    Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Host requested COLD reset (cmd=1)", DateTime.Now));
+                                } else if (cmd == 1 || cmd == 2) { // COLD or WARM RESET
+                                    Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Host requested {1} reset (cmd={2})", 
+                                        DateTime.Now, cmd == 1 ? "COLD" : "WARM", cmd));
                                     IC_ResetMifare(dev, 20);
                                     Thread.Sleep(30);
                                     ActivateRfCard();
-                                } else if (cmd == 2) { // WARM RESET
-                                    Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Host requested WARM reset (cmd=2)", DateTime.Now));
                                 }
                             } else if (len > 1) {
                                 Console.WriteLine(string.Format("[APDU In  {0:HH:mm:ss.fff}] (len={1}) {2}", 
@@ -363,10 +398,21 @@ public class DecardT6RfBridge {
                                     stream.Flush();
                                 }
                             }
+                            lastActivity = DateTime.Now;
                         } else {
                             if (client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available == 0) {
                                 throw new IOException("VPCD socket closed by host");
                             }
+
+                            DateTime now = DateTime.Now;
+                            if ((now - lastActivity).TotalMilliseconds >= 400 && (now - lastRfPoll).TotalMilliseconds >= 400) {
+                                lastRfPoll = now;
+                                if (!CheckRfCardPresent()) {
+                                    Console.WriteLine(string.Format("[Bridge {0:HH:mm:ss.fff}] Contactless card removed from RF field!", now));
+                                    throw new IOException("Contactless card removed");
+                                }
+                            }
+
                             Thread.Sleep(10);
                         }
                     }
@@ -377,6 +423,7 @@ public class DecardT6RfBridge {
                     client = null;
                     stream = null;
                     cardPresent = false;
+                    isCpuCard = false;
                     try { IC_ResetMifare(dev, 20); } catch {}
                     Console.WriteLine("[Bridge] >>> Card REMOVED. Windows PC/SC notified (EMPTY). Waiting for card... <<<\n");
                     Thread.Sleep(100);

@@ -208,7 +208,11 @@ public class FeitianSCR501Bridge {
             int ret = ft_dev_check_card(hDev, ref status);
             return (ret == 0 && status != 0);
         } else if (currentMedium == CardMedium.Contactless) {
-            return true;
+            byte[] probe = new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00 };
+            byte[] resp = new byte[64];
+            int rlen = resp.Length;
+            int ret = ft_iso14443_4_command(hDev, probe, probe.Length, resp, ref rlen, 0);
+            return (ret == 0 && rlen >= 2);
         }
         return false;
     }

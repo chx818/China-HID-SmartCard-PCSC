@@ -19,7 +19,7 @@ echo   Executing GlobalPlatformPro over "Virtual PCD" Reader...
 echo ===============================================================
 echo.
 
-"%GP_EXE%" -r "Virtual PCD" -l -v
+"%GP_EXE%" -r "Virtual PCD" -l -v -X
 
 echo.
 echo ===============================================================
