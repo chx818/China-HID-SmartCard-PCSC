@@ -63,16 +63,25 @@ public class DecardUnifiedBridge {
     public static extern short IC_Status(IntPtr idComDev);
 
     [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
+    public static extern short IC_Down(IntPtr idComDev);
+
+    [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
     public static extern short IC_InitType(IntPtr idComDev, short type);
 
     [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
     public static extern short IC_CpuReset(IntPtr idComDev, out byte rlen, byte[] databuffer);
 
     [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
+    public static extern short IC_CpuGetProtocol(IntPtr idComDev);
+
+    [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
     public static extern short IC_CpuApdu(IntPtr idComDev, byte slen, byte[] sendbuffer, out byte rlen, byte[] databuffer);
 
     [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
     public static extern short IC_CpuApduEXT(IntPtr idComDev, short slen, byte[] sendbuffer, out short rlen, byte[] databuffer);
+
+    [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
+    public static extern short IC_CpuApduSourceEXT(IntPtr idComDev, short slen, byte[] sendbuffer, out short rlen, byte[] databuffer);
 
     // Contactless RF (ISO 14443 Type A / T=CL)
     [DllImport("dcic32.dll", CallingConvention = CallingConvention.StdCall)]
@@ -111,6 +120,8 @@ public class DecardUnifiedBridge {
     private static byte[] currentAtr = new byte[0];
     private static bool isCpuCard = false;
 
+    private static short contactProtocol = 0; // 0=T=0, 1=T=1
+
     public static bool PreferContact = true;
 
     // Contact Card Helpers
@@ -118,36 +129,122 @@ public class DecardUnifiedBridge {
         if (IC_Status(dev) != 0) return false;
         IC_InitType(dev, 0x0C);
         byte rlen = 0;
-        byte[] atrBuf = new byte[64];
+        byte[] atrBuf = new byte[256];
         short ret = IC_CpuReset(dev, out rlen, atrBuf);
         if (ret == 0 && rlen > 0) {
             currentAtr = new byte[rlen];
             Array.Copy(atrBuf, currentAtr, rlen);
+            contactProtocol = IC_CpuGetProtocol(dev);
             return true;
         }
         return false;
     }
 
-    public static byte[] TransmitContactApdu(byte[] apdu) {
+    private static byte[] SendRawContact(byte[] apdu) {
+        short rlen = 0;
         byte[] rapdu = new byte[4096];
-        if (apdu.Length <= 255) {
-            byte rlen = 0;
-            short ret = IC_CpuApdu(dev, (byte)apdu.Length, apdu, out rlen, rapdu);
-            if (ret == 0 && rlen >= 2) {
-                byte[] resp = new byte[rlen];
-                Array.Copy(rapdu, resp, rlen);
-                return resp;
-            }
-        } else {
-            short rlen = 0;
-            short ret = IC_CpuApduEXT(dev, (short)apdu.Length, apdu, out rlen, rapdu);
-            if (ret == 0 && rlen >= 2) {
-                byte[] resp = new byte[rlen];
-                Array.Copy(rapdu, resp, rlen);
-                return resp;
-            }
+        short ret = IC_CpuApduSourceEXT(dev, (short)apdu.Length, apdu, out rlen, rapdu);
+        if (ret == 0 && rlen > 0) {
+            byte[] res = new byte[rlen];
+            Array.Copy(rapdu, res, rlen);
+            return res;
         }
         return null;
+    }
+
+    public static byte[] TransmitContactApdu(byte[] apdu) {
+        if (apdu == null || apdu.Length < 4) return null;
+
+        // If card operates in T=1: send directly via IC_CpuApduSourceEXT
+        if (contactProtocol == 1) {
+            return SendRawContact(apdu);
+        }
+
+        // T=0 Engine:
+        // 1. Intercept GET RESPONSE (00 C0 00 00 Le) when Le == 0x00 (256 bytes)
+        // DeCard T6 USB HID FIFO overruns when retrieving 256 bytes at once.
+        // Retrieve in chunks <= 128 bytes.
+        if (apdu.Length == 5 && apdu[0] == 0x00 && apdu[1] == 0xC0 && apdu[2] == 0x00 && apdu[3] == 0x00 && apdu[4] == 0x00) {
+            byte[] r1 = SendRawContact(new byte[] { 0x00, 0xC0, 0x00, 0x00, 0x80 }); // 128 bytes
+            if (r1 == null || r1.Length < 2) return r1;
+            if (r1.Length > 2 && r1[r1.Length - 2] == 0x61) {
+                byte remain = r1[r1.Length - 1];
+                byte chunk2 = (byte)Math.Min((int)(remain == 0 ? 128 : remain), 128);
+                byte[] r2 = SendRawContact(new byte[] { 0x00, 0xC0, 0x00, 0x00, chunk2 });
+                if (r2 != null && r2.Length >= 2) {
+                    MemoryStream ms = new MemoryStream();
+                    ms.Write(r1, 0, r1.Length - 2);
+                    ms.Write(r2, 0, r2.Length);
+                    return ms.ToArray();
+                }
+            }
+            return r1;
+        }
+
+        // 2. Case 1 APDU normalization: T=0 TPDU requires 5-byte header [CLA, INS, P1, P2, 00]
+        byte[] cmdToSend = apdu;
+        if (cmdToSend.Length == 4) {
+            byte[] cmd5 = new byte[5];
+            Array.Copy(cmdToSend, 0, cmd5, 0, 4);
+            cmd5[4] = 0x00;
+            cmdToSend = cmd5;
+        }
+        // 3. Case 4 APDU normalization:
+        // In T=0, Case 4 short APDU (CLA INS P1 P2 Lc Data... Le) has length = 5 + Lc + 1.
+        // Strip trailing Le byte to send as Case 3 TPDU; response data is retrieved via 61 loop.
+        else if (cmdToSend.Length >= 6) {
+            int lc = cmdToSend[4];
+            if (cmdToSend.Length == 5 + lc + 1) {
+                byte[] c3 = new byte[5 + lc];
+                Array.Copy(cmdToSend, 0, c3, 0, 5 + lc);
+                cmdToSend = c3;
+            }
+        }
+
+        byte[] resp = SendRawContact(cmdToSend);
+        if (resp == null || resp.Length < 2) return resp;
+
+        // 4. Handle 6C xx (Wrong Le -> replay command with correct Le)
+        if (resp.Length == 2 && resp[0] == 0x6C) {
+            byte correctLe = resp[1];
+            byte[] replay = new byte[cmdToSend.Length];
+            Array.Copy(cmdToSend, replay, cmdToSend.Length);
+            replay[replay.Length - 1] = correctLe;
+            resp = SendRawContact(replay);
+            if (resp == null || resp.Length < 2) return resp;
+        }
+
+        // 5. Handle 61 xx (Response data available -> GET RESPONSE loop with safe chunk size <= 128)
+        if (resp.Length == 2 && resp[0] == 0x61) {
+            MemoryStream ms = new MemoryStream();
+            byte sw1 = resp[0];
+            byte sw2 = resp[1];
+
+            int round = 0;
+            while (sw1 == 0x61 && round < 64) {
+                round++;
+                int want = (sw2 == 0) ? 256 : sw2;
+                int chunk = Math.Min(want, 128); // Safe chunk size <= 128
+                byte le = (byte)(chunk & 0xFF);
+
+                byte[] getResp = new byte[] { 0x00, 0xC0, 0x00, 0x00, le };
+                byte[] r = SendRawContact(getResp);
+                if (r == null || r.Length < 2) break;
+
+                if (r.Length > 2) {
+                    ms.Write(r, 0, r.Length - 2);
+                }
+
+                sw1 = r[r.Length - 2];
+                sw2 = r[r.Length - 1];
+            }
+
+            ms.WriteByte(sw1);
+            ms.WriteByte(sw2);
+            return ms.ToArray();
+        }
+
+        return resp;
     }
 
     // Contactless Card Helpers
@@ -457,11 +554,12 @@ public class DecardUnifiedBridge {
                                     if (activeMedium == CardMedium.Contact) {
                                         if (cmd == 1) IC_InitType(dev, 0x0C);
                                         byte rlen = 0;
-                                        byte[] atrBuf = new byte[64];
+                                        byte[] atrBuf = new byte[256];
                                         short ret = IC_CpuReset(dev, out rlen, atrBuf);
                                         if (ret == 0 && rlen > 0) {
                                             currentAtr = new byte[rlen];
                                             Array.Copy(atrBuf, currentAtr, rlen);
+                                            contactProtocol = IC_CpuGetProtocol(dev);
                                         }
                                     } else if (activeMedium == CardMedium.Contactless) {
                                         IC_ResetMifare(dev, 20);
@@ -554,7 +652,11 @@ public class DecardUnifiedBridge {
                     CardMedium removedMedium = activeMedium;
                     activeMedium = CardMedium.None;
                     isCpuCard = false;
-                    try { IC_ResetMifare(dev, 20); } catch {}
+                    if (removedMedium == CardMedium.Contact) {
+                        try { IC_Down(dev); } catch {}
+                    } else if (removedMedium == CardMedium.Contactless) {
+                        try { IC_ResetMifare(dev, 20); } catch {}
+                    }
                     Console.WriteLine(string.Format("[Bridge] >>> [{0} CARD REMOVED]. Windows PC/SC notified (EMPTY). Waiting for card... <<<\n", 
                         removedMedium.ToString().ToUpper()));
                     Thread.Sleep(100);
