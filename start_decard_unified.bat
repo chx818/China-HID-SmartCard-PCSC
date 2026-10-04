@@ -19,8 +19,10 @@ if exist "%SystemRoot%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" (
 
 "%POWERSHELL_BIN%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\decard_unified_bridge.ps1" %*
 
-if %ERRORLEVEL% NEQ 0 (
+set "BRIDGE_EXIT=%ERRORLEVEL%"
+if %BRIDGE_EXIT% NEQ 0 (
     echo.
-    echo [ERROR] Bridge exited with error code %ERRORLEVEL%.
+    echo [ERROR] Bridge exited with error code %BRIDGE_EXIT%.
     pause
 )
+exit /b %BRIDGE_EXIT%

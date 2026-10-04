@@ -4,6 +4,11 @@
 > 专为国产“免驱 HID”智能卡读卡器打造的系统级 PC/SC 虚拟驱动映射工具箱。  
 > 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)** 等设备，将私有 HID 协议秒变 Windows 标准系统智能卡读卡器！
 
+
+> **2026-10-04 德卡重构更新**：三个德卡入口已统一收敛至高性能底层引擎 `scripts/DecardBridge.cs`，彻底修复重复发送 APDU、T=0 数据改写、RF 帧误解析和 TCP 半包阻塞等问题；同时完整保留接触式与非接触式的主动即时移卡与重新插卡感知。
+>
+> 统一入口是**单虚拟卡位**，默认接触优先；两张卡同时放置时，使用 `start_decard_rf.bat` 或 `start_decard_unified.bat -Priority RfFirst` 读取非接卡。三个入口共享一台设备的互斥锁，不能同时运行。RF 保留原来的约 400ms 空闲 I-block 探测和 40ms 失败复查；确认失联后主动通知 Windows。探针与完整业务交换串行，不在 APDU/WTX/分块过程中插入。默认不记录 APDU 载荷。
+
 ---
 
 ## ⚠️【重中之重 · 运行必读前置条件】必须先安装 VPCD (BixVReader)
@@ -75,9 +80,9 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 
 | 启动脚本 (BAT) | 适用硬件型号 | 工作模式 | 核心特点与使用场景 |
 | :--- | :--- | :--- | :--- |
-| **`start_decard_unified.bat`**<br>**(🔥 强烈推荐首选)** | 德卡 T6 双界面<br>德卡 T10<br>德卡 T6 单界面 | **二合一智能感知**<br>(接触 + 非接触) | **日常使用首选！单脚本自动处理所有情况**：<br>• 插卡即走接触式，碰卡即走非接区，自由选择无需换脚本。<br>• **长耗时运算免断联**：业务 APDU 支持 2.5 秒计算等待，完美运行 **FIDO2 / WebAuthn Passkey 网页验证**、**OpenPGP 密钥解密/签名**、**PIV 证书登录**。<br>• **毫秒级看门狗**：看门狗探针轻量化，放卡/拿卡 150ms 极速响应，手感极其丝滑！ |
-| **`start_decard_rf.bat`** | 德卡 T6 双界面<br>德卡 T10 非接区 | 独立非接触 (RF)<br>(ISO 14443-4 T=CL) | 专用于只想挥非接卡/安全 Key 的场景，轻量独立，不占用接触式资源。 |
-| **`start_decard_contact.bat`** | 德卡 T6 单界面 / 双界面<br>德卡 T10 接触槽 | 独立接触式 (Contact)<br>(ISO 7816-3 T=0) | 专用于纯插卡环境（T6 与 T10 通用）。利用物理微动开关硬件检测，金手指持续恒定供电。特别适合在 JavaCard 上生成 **RSA-4096 / Ed25519** 等大耗时密钥，永不断电掉场。 |
+| **`start_decard_unified.bat`** | 德卡 T6 双界面（本轮实测）<br>T10/单界面需另行验收 | 单卡位自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；只在建立新会话时选择卡位。当前验收覆盖只读 APDU、复位、分块及连接恢复。 |
+| **`start_decard_rf.bat`** | 德卡 T6 非接区（本轮实测） | 固定非接触 RF | ISO 14443-A/ISO-DEP。空闲约 400ms 检测移卡并主动通知 Windows；不支持 Type B、10 字节 UID 或存储卡伪 APDU。独占整台 T6 的 SDK 访问。 |
+| **`start_decard_contact.bat`** | 德卡 T6 接触槽（本轮实测） | 固定接触位 | 接触状态约 250ms 轮询。本轮实测 T=0；T=1 仅离线测试。T=0 保留原有 SDK 命令映射和扩展命令转交行为。密钥生成及长耗时业务未验收。 |
 | **`start_feitian_scr501.bat`** | 飞天 SCR501<br>(ROCKEY 531) | 专用非接触中继<br>(`RK501API.dll`) | **⚠️ 明确说明：目前仅实现非接触（挥卡）界面可用！**<br>基于飞天诚信官方动态库，内置防掉卡去抖看门狗，稳定读取各类非接 CPU 卡、JavaCard 与 FIDO Key。 |
 | **`test_gp.bat`** | 通用诊断 | GlobalPlatformPro | 自动探测并调用 `gp.exe` 连通 `Virtual PCD`，打印卡片内的安全域、AID 与 Applet 列表，一键测试链路是否畅通。 |
 
@@ -94,21 +99,20 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 - 如果你使用的是**飞天 SCR501（挥非接卡）**：
   直接双击 **`start_feitian_scr501.bat`**。
 
-终端打印如下握手日志并发出清脆的蜂鸣声，代表驱动中继建立成功：
+德卡入口打印 `Connected medium=...` 后，表示物理卡已激活并连接到 VPCD；再用上层软件验证 APDU：
 ```text
-[Bridge] Connecting to DeCard reader via dcic32.dll (Port 100)...
-[Bridge] Hardware connected. Handle: 180 (Firmware: T6URM-T101)
-[Bridge] Detection Loop Active: Insert contact card OR tap contactless card...
+DeCard mode=Auto, priority=Contact, VPCD=127.0.0.1:35963
+Connected medium=Contact ATR=...
 ```
 
 ### 第三步：开始使用！
-现在你的任何标准智能卡软件都可以像对待几百块钱的 ACS 读卡器一样无缝操作它：
+应用能否使用还取决于卡内 Applet、APDU 长度和上层中间件。以下是用途示例；本轮验收只覆盖报告列出的只读交互：
 - **OpenPGP 状态查看**：
   ```cmd
   gpg --card-status
   ```
 - **FIDO2 / Passkey 测试**：
-  直接使用 Edge / Chrome 浏览器访问 [WebAuthn.io](https://webauthn.io) 或 [Token2 Passkey 体验站](https://www.token2.com)，挥卡直接触发生物/PIN 认证！
+  是否可用取决于系统、浏览器、卡内应用及 CTAP/NFC 接入支持；不能仅凭 PC/SC 桥接成功推断 WebAuthn 可用。本轮未验证该功能。
 - **GlobalPlatformPro 卡片管理**：
   直接双击根目录下的 `test_gp.bat`，或在命令行中运行：
   ```cmd

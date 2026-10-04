@@ -25,3 +25,10 @@ $RECYCLE.BIN/
 # Experimental / In-development hardware bridges
 start_feitian_scr501_contact.bat
 scripts/feitian_scr501_contact_bridge.ps1
+
+# Internal reports, test fixtures, and audit documents
+reports/
+tests/
+REVIEW-*.md
+PRESENCE-*.md
+*.zh-CN.md
