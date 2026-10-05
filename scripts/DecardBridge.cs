@@ -124,6 +124,7 @@ namespace ChinaHid {
         private readonly Func<byte[], byte, byte[]> exchange;
         private readonly int chunk;
         private int block;
+        public bool StartupPresence { get; set; }
         public int MaxBlocks = 16384;
         public int MaxWtx = 4096;
         // Long operations that keep responding with WTX must not be cut off at 30 seconds.
@@ -135,17 +136,17 @@ namespace ChinaHid {
             chunk = Math.Min(250, ats.FrameSize - 3);
         }
         private byte[] Exchange(byte[] frame, Stopwatch clock, ref int blocks, ref int wtx, bool presence) {
-            byte initialTimeout = presence ? (byte)2 : (byte)10;
+            byte initialTimeout = presence && !StartupPresence ? (byte)2 : (byte)10;
             byte timeout = initialTimeout;
-            int deadline = presence ? 1500 : DeadlineMs;
+            int deadline = presence ? (StartupPresence ? 5000 : 1500) : DeadlineMs;
             while (true) {
-                if (++blocks > (presence ? 16 : MaxBlocks) || (deadline > 0 && clock.ElapsedMilliseconds >= deadline))
+                if (++blocks > (presence ? (StartupPresence ? 64 : 16) : MaxBlocks) || (deadline > 0 && clock.ElapsedMilliseconds >= deadline))
                     throw new LinkException("ISO-DEP exchange deadline/block limit");
                 byte[] r = exchange(frame, timeout);
                 if (deadline > 0 && clock.ElapsedMilliseconds >= deadline) throw new LinkException("ISO-DEP exchange deadline");
                 if (r == null || r.Length < 1 || r.Length > 255) throw new LinkException("RF exchange failed; execution outcome unknown");
                 if (r[0] != 0xF2) return r;
-                if (r.Length != 2 || r[1] < 1 || r[1] > 59 || ++wtx > (presence ? 4 : MaxWtx))
+                if (r.Length != 2 || r[1] < 1 || r[1] > 59 || ++wtx > (presence ? (StartupPresence ? 32 : 4) : MaxWtx))
                     throw new LinkException("Invalid or excessive WTX");
                 frame = new byte[] { 0xF2, r[1] };
                 timeout = (byte)Math.Min(255, initialTimeout * r[1]);
@@ -168,7 +169,9 @@ namespace ChinaHid {
                 }
                 offset += count;
             }
-            return Receive(r, clock, ref blocks, ref wtx, false);
+            byte[] response = Receive(r, clock, ref blocks, ref wtx, false);
+            StartupPresence = false;
+            return response;
         }
         private byte[] Receive(byte[] r, Stopwatch clock, ref int blocks, ref int wtx, bool presence) {
             using (MemoryStream result = new MemoryStream()) {
@@ -176,7 +179,7 @@ namespace ChinaHid {
                     byte pcb = r[0];
                     // Only I-blocks without CID/NAD are negotiated. Never expose control frames as APDU data.
                     if ((pcb & 0xEE) != 0x02 || (pcb & 1) != block)
-                        throw new LinkException("Unexpected RF block type/sequence");
+                        throw new LinkException("Unexpected RF block type/sequence: expected=" + block + ", PCB=" + pcb.ToString("X2") + ", len=" + r.Length);
                     if ((!presence && r.Length < 2) || result.Length + r.Length - 1 > 65535)
                         throw new LinkException("RF response length limit");
                     result.Write(r, 1, r.Length - 1);
@@ -203,6 +206,7 @@ namespace ChinaHid {
             // An echo may have no INF (observed on T6). Drain any chained reply before
             // accepting another APDU, and advance the number only for validated I-blocks.
             Receive(r, clock, ref blocks, ref wtx, true);
+            StartupPresence = false;
             return true;
         }
     }
@@ -221,8 +225,12 @@ namespace ChinaHid {
     internal static class Native {
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
         internal static extern IntPtr LoadLibraryEx(string file, IntPtr reserved, uint flags);
+
+        // dcic32.dll (T6 / standard DeCard Contact IC)
+        [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_ReadVer(IntPtr d, [Out] byte[] b);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern IntPtr IC_InitCommAdvanced(short port);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_ExitComm(IntPtr d);
+        [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_DevBeep(IntPtr d, byte duration);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Status(IntPtr d);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Down(IntPtr d);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_InitType(IntPtr d, short type);
@@ -237,63 +245,144 @@ namespace ChinaHid {
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Select2(IntPtr d, uint uid, out byte sak);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Pro_Reset(IntPtr d, out byte len, [Out] byte[] b);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Pro_Commandsource(IntPtr d, byte len, byte[] c, out byte n, [Out] byte[] b, byte timeout);
+
+        // dcrf32.dll (A133 RF backend; contact support requires separate qualification)
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_getver(int d, [Out] byte[] b);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern int dc_init(short port, int baud);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_exit(int d);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_beep(int d, short duration);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_reset(int d, ushort ms);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_config_card(int d, byte type);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_request(int d, byte mode, out ushort type);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_anticoll(int d, byte bits, out uint uid);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_select(int d, uint uid, out byte sak);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_anticoll2(int d, byte bits, out uint uid);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_select2(int d, uint uid, out byte sak);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_pro_reset(int d, out byte len, [Out] byte[] b);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_pro_commandsource(int d, byte len, byte[] c, out byte n, [Out] byte[] b, byte timeout);
     }
 
     public sealed class Decard : ICard {
         private IntPtr dev;
+        private bool useDcrf;
+        private static bool icLoaded, rfLoaded;
+        private static string loadedDirectory;
+        private bool rfFieldOn;
+        private Stopwatch rfActivated = new Stopwatch();
+        private Stopwatch deviceHealth = Stopwatch.StartNew();
+        private bool isYubiKey;
         private IsoDep rf;
+        public string Backend { get { return useDcrf ? "dcrf32" : "dcic32"; } }
         private int protocol;
         public byte[] Atr { get; private set; }
         public string Medium { get; private set; }
         public static void LoadDriver(string directory) {
-            string path = Path.GetFullPath(Path.Combine(directory, "dcic32.dll"));
-            if (!File.Exists(path)) throw new FileNotFoundException("Missing vendor driver", path);
-            if (IntPtr.Size != 4) throw new InvalidOperationException("dcic32.dll requires x86 PowerShell");
-            // Search the absolute DLL's directory and System32, never the working directory/PATH.
-            if (Native.LoadLibraryEx(path, IntPtr.Zero, 0x00000100 | 0x00000800) == IntPtr.Zero)
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Cannot load dcic32.dll");
+            if (IntPtr.Size != 4) throw new InvalidOperationException("DeCard driver requires x86 PowerShell");
+            directory = Path.GetFullPath(directory);
+            if (loadedDirectory != null) {
+                if (!String.Equals(directory, loadedDirectory, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Vendor libraries already loaded from another directory");
+                return;
+            }
+            string icPath = Path.Combine(directory, "dcic32.dll");
+            string rfPath = Path.Combine(directory, "dcrf32.dll");
+            if (File.Exists(icPath)) {
+                icLoaded = Native.LoadLibraryEx(icPath, IntPtr.Zero, 0x100 | 0x800) != IntPtr.Zero;
+                if (!icLoaded) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Cannot load packaged dcic32.dll");
+            }
+            if (File.Exists(rfPath)) {
+                rfLoaded = Native.LoadLibraryEx(rfPath, IntPtr.Zero, 0x100 | 0x800) != IntPtr.Zero;
+                if (!rfLoaded) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Cannot load packaged dcrf32.dll");
+            }
+            if (!icLoaded && !rfLoaded) throw new FileNotFoundException("No packaged DeCard SDK DLL found", directory);
+            loadedDirectory = directory;
         }
         public Decard() {
             Atr = new byte[0]; Medium = "None";
-            dev = Native.IC_InitCommAdvanced(100);
-            if (dev == IntPtr.Zero || dev == new IntPtr(-1)) { dev = IntPtr.Zero; throw new LinkException("Cannot open T6 USB reader"); }
+            if (loadedDirectory == null) throw new InvalidOperationException("LoadDriver must succeed before opening a reader");
+            // These packaged x86 SDKs return positive port tokens and negative error codes.
+            // A token belongs to exactly one DLL. Never mix calls from two SDKs.
+            long icResult = 0, rfResult = 0;
+            if (icLoaded) { dev = Native.IC_InitCommAdvanced(100); icResult = dev.ToInt64(); }
+            if (dev.ToInt64() <= 0 && rfLoaded) {
+                int token = Native.dc_init(100, 115200); rfResult = token;
+                if (token > 0) { dev = new IntPtr(token); useDcrf = true; }
+            }
+            if (dev.ToInt64() <= 0) {
+                dev = IntPtr.Zero;
+                throw new LinkException("Cannot open DeCard USB reader (dcic32=" + icResult + ", dcrf32=" + rfResult + ")");
+            }
+        }
+        internal void Beep() {
+            if (useDcrf) Native.dc_beep((int)dev, 10);
+            else Native.IC_DevBeep(dev, 10);
         }
         private static void Require(short code, string operation) {
             if (code != 0) throw new LinkException(operation + " failed: " + code);
         }
         private bool Contact() {
-            short status = Native.IC_Status(dev);
-            if (status == 1) return false;
-            Require(status, "Contact presence check");
-            Require(Native.IC_InitType(dev, 0x0C), "Contact slot selection");
-            Require(Native.IC_Down(dev), "Contact power off");
-            byte n; byte[] b = new byte[256];
-            Require(Native.IC_CpuReset(dev, out n, b), "Contact reset");
-            if (n < 2 || n > 33) throw new LinkException("Invalid contact ATR length");
-            protocol = Native.IC_CpuGetProtocol(dev);
-            if (protocol != 0 && protocol != 1) throw new LinkException("Invalid contact protocol: " + protocol);
-            Atr = Apdu.Slice(b, 0, n); Medium = "Contact"; return true;
+            if (useDcrf) {
+                // This A133 reader returned 100 for dc_card_status. Its contact-slot API,
+                // protocol and removal semantics have not been established. Do not reset
+                // a SAM slot or report a permanent "present" card in an RF-only backend.
+                return false;
+            } else {
+                short status = Native.IC_Status(dev);
+                if (status == 1) return false;
+                Require(status, "Contact presence check");
+                Require(Native.IC_InitType(dev, 0x0C), "Contact slot selection");
+                Require(Native.IC_Down(dev), "Contact power off");
+                byte n; byte[] b = new byte[256];
+                Require(Native.IC_CpuReset(dev, out n, b), "Contact reset");
+                if (n < 2 || n > 33) throw new LinkException("Invalid contact ATR length");
+                protocol = Native.IC_CpuGetProtocol(dev);
+                if (protocol != 0 && protocol != 1) throw new LinkException("Invalid contact protocol: " + protocol);
+                Atr = Apdu.Slice(b, 0, n); Medium = "Contact"; return true;
+            }
+        }
+        private void StartRfField() {
+            if (useDcrf) Require(Native.dc_reset((int)dev, 20), "RF field reset");
+            else Require(Native.IC_ResetMifare(dev, 20), "RF field reset");
+            rfFieldOn = true; // Cleanup must also switch off a field whose subsequent configuration fails.
+            if (useDcrf) Require(Native.dc_config_card((int)dev, (byte)'A'), "RF Type A configuration");
         }
         private bool Rf() {
-            Require(Native.IC_ResetMifare(dev, 20), "RF field reset");
+            // Leave the field on while seeking a card. Repeated resets can prevent a
+            // slowly starting NFC token from ever becoming ready.
+            if (!rfFieldOn) StartRfField();
             ushort type;
-            if (Native.IC_Request(dev, 1, out type) != 0 && Native.IC_Request(dev, 0, out type) != 0) return false;
+            short request = useDcrf ? Native.dc_request((int)dev, 1, out type) : Native.IC_Request(dev, 1, out type);
+            if (request != 0) {
+                request = useDcrf ? Native.dc_request((int)dev, 0, out type) : Native.IC_Request(dev, 0, out type);
+                if (request != 0) return false;
+            }
             uint uid; byte sak;
-            Require(Native.IC_Anticoll(dev, 0, out uid), "RF anticollision CL1");
-            Require(Native.IC_Select(dev, uid, out sak), "RF select CL1");
+            Require(useDcrf ? Native.dc_anticoll((int)dev, 0, out uid) : Native.IC_Anticoll(dev, 0, out uid), "RF anticollision CL1");
+            Require(useDcrf ? Native.dc_select((int)dev, uid, out sak) : Native.IC_Select(dev, uid, out sak), "RF select CL1");
             if ((sak & 4) != 0) {
-                Require(Native.IC_Anticoll2(dev, 0, out uid), "RF anticollision CL2");
-                Require(Native.IC_Select2(dev, uid, out sak), "RF select CL2");
+                Require(useDcrf ? Native.dc_anticoll2((int)dev, 0, out uid) : Native.IC_Anticoll2(dev, 0, out uid), "RF anticollision CL2");
+                Require(useDcrf ? Native.dc_select2((int)dev, uid, out sak) : Native.IC_Select2(dev, uid, out sak), "RF select CL2");
             }
             if ((sak & 4) != 0) throw new LinkException("10-byte RF UID not supported by this SDK adapter");
             if ((sak & 0x20) == 0) throw new LinkException("RF card does not support ISO 14443-4 APDUs");
             byte n; byte[] b = new byte[256];
-            Require(Native.IC_Pro_Reset(dev, out n, b), "RF RATS");
+            Require(useDcrf ? Native.dc_pro_reset((int)dev, out n, b) : Native.IC_Pro_Reset(dev, out n, b), "RF RATS");
             Ats ats = Ats.Parse(Apdu.Slice(b, 0, n));
-            Atr = ats.Atr; rf = new IsoDep(ats, RfRaw); Medium = "Rf"; return true;
+            isYubiKey = System.Text.Encoding.ASCII.GetString(b, 0, n).IndexOf("YubiKey", StringComparison.Ordinal) >= 0;
+            Atr = ats.Atr; rf = new IsoDep(ats, RfRaw); rf.StartupPresence = isYubiKey;
+            rfActivated.Restart(); Medium = "Rf"; return true;
         }
         public bool Activate(string mode, bool preferContact) {
+            bool wasRf = rf != null;
             Atr = new byte[0]; Medium = "None"; rf = null;
+            if (wasRf) rfFieldOn = false;
+            if (mode == "Contact" && useDcrf)
+                throw new NotSupportedException("This dcrf32 backend is qualified for RF only; contact protocol/removal support is not verified");
+            if (deviceHealth.ElapsedMilliseconds >= 3000) {
+                byte[] version = new byte[256];
+                Require(useDcrf ? Native.dc_getver((int)dev, version) : Native.IC_ReadVer(dev, version), "USB reader health check");
+                deviceHealth.Restart();
+            }
             if (mode == "Contact") return Contact();
             if (mode == "Rf") return Rf();
             if (mode != "Auto") throw new ArgumentException("Unknown card mode");
@@ -304,6 +393,7 @@ namespace ChinaHid {
         }
         public void Reset() {
             string medium = Medium;
+            if (medium == "Rf") rfFieldOn = false;
             Atr = new byte[0]; rf = null;
             try {
                 if (!(medium == "Contact" ? Contact() : medium == "Rf" && Rf()))
@@ -313,17 +403,28 @@ namespace ChinaHid {
         public void PowerOff() {
             Atr = new byte[0]; rf = null;
             if (Medium == "Contact") Require(Native.IC_Down(dev), "Contact power off");
-            else if (Medium == "Rf") Require(Native.IC_ResetMifare(dev, 20), "RF session reset");
+            else if (Medium == "Rf" || rfFieldOn) {
+                if (useDcrf) Require(Native.dc_reset((int)dev, 0), "RF field off");
+                else Require(Native.IC_ResetMifare(dev, 20), "RF session reset");
+                rfFieldOn = false;
+            }
         }
-        public bool ContactPresent() { return Medium != "Contact" || Native.IC_Status(dev) == 0; }
+        public bool ContactPresent() {
+            if (Medium != "Contact") return true;
+            if (useDcrf) throw new LinkException("Unqualified contact backend");
+            return Native.IC_Status(dev) == 0;
+        }
         public bool RfPresent() {
             if (Medium != "Rf") return true;
             // A powered-down RF card still needs idle removal monitoring. Reactivate
             // without exposing it as a new Windows card, then use the same presence path.
             if (rf == null) Reset();
+            // Preserve the startup grace even after OFF/ATR/RESET in an existing session.
+            if (rfActivated.ElapsedMilliseconds < 400) return true;
             return rf.Present();
         }
         private byte[] ContactRaw(byte[] c) {
+            if (useDcrf) throw new LinkException("Cannot send a dcrf32 handle to dcic32");
             if (c.Length > Int16.MaxValue) throw new LinkException("Native send length exceeded");
             // SDK lacks a receive capacity argument. Reserve its full 16-bit output range.
             byte[] b = new byte[65536]; short n;
@@ -334,7 +435,10 @@ namespace ChinaHid {
         private byte[] RfRaw(byte[] c, byte timeout) {
             if (c.Length > 255) throw new LinkException("RF native send length exceeded");
             byte n; byte[] b = new byte[256];
-            Require(Native.IC_Pro_Commandsource(dev, checked((byte)c.Length), c, out n, b, timeout), "RF block (outcome unknown)");
+            short ret = useDcrf
+                ? Native.dc_pro_commandsource((int)dev, checked((byte)c.Length), c, out n, b, timeout)
+                : Native.IC_Pro_Commandsource(dev, checked((byte)c.Length), c, out n, b, timeout);
+            Require(ret, "RF block (outcome unknown)");
             return Apdu.Slice(b, 0, n);
         }
         public byte[] Transmit(byte[] c) {
@@ -344,9 +448,13 @@ namespace ChinaHid {
             return rf.Transmit(c);
         }
         public void Dispose() {
-            if (dev == IntPtr.Zero) return;
+            if (dev == IntPtr.Zero || (int)dev <= 0) return;
             try { PowerOff(); } catch (IOException) { }
-            finally { Native.IC_ExitComm(dev); dev = IntPtr.Zero; }
+            finally {
+                if (useDcrf) Native.dc_exit((int)dev);
+                else Native.IC_ExitComm(dev);
+                dev = IntPtr.Zero;
+            }
         }
     }
 
@@ -379,6 +487,9 @@ namespace ChinaHid {
     }
 
     public sealed class Session {
+        public const int RfQuietMs = 400;
+        public const int RfIdlePollMs = 200;
+        public const int ContactPollMs = 100;
         private readonly ICard card;
         private bool powered = true;
         public Session(ICard card) { this.card = card; }
@@ -402,25 +513,25 @@ namespace ChinaHid {
         }
         public void Run(TcpClient client, Func<bool> stop, int frameTimeout) {
             NetworkStream stream = client.GetStream();
-            Stopwatch contactPoll = Stopwatch.StartNew(), idle = Stopwatch.StartNew();
+            Stopwatch contactPoll = Stopwatch.StartNew(), idle = Stopwatch.StartNew(), rfPoll = Stopwatch.StartNew();
             while (!stop()) {
-                // Drain host requests before probing. Receive a complete frame and finish
-                // its complete APDU/WTX/chaining operation on this same thread.
-                if (client.Client.Poll(10000, SelectMode.SelectRead)) {
+                if (client.Client.Poll(5000, SelectMode.SelectRead)) {
                     if (client.Available == 0) throw new EndOfStreamException("VPCD closed");
                     byte[] payload = Framing.Read(stream, frameTimeout);
                     byte[] response = Handle(payload);
                     if (response != null) Framing.Write(stream, response);
-                    // Repeated ATR polling by Windows must not starve presence checks.
+                    // Keep the 400ms quiet period after an APDU/reset; ATR polling must not starve detection.
                     if (payload.Length != 1 || payload[0] != 4) idle.Restart();
                 }
-                if (contactPoll.ElapsedMilliseconds >= 250) {
+                if (contactPoll.ElapsedMilliseconds >= ContactPollMs) {
                     if (!card.ContactPresent()) throw new LinkException("Contact removed");
                     contactPoll.Restart();
                 }
-                if (card.Medium == "Rf" && idle.ElapsedMilliseconds >= 400 && !stream.DataAvailable) {
+                // Startup/business grace and steady polling are separate clocks. Fast idle
+                // polls never reduce the initial 400ms grace or interrupt an active APDU.
+                if (card.Medium == "Rf" && idle.ElapsedMilliseconds >= RfQuietMs && rfPoll.ElapsedMilliseconds >= RfIdlePollMs && !stream.DataAvailable) {
                     if (!card.RfPresent()) throw new LinkException("RF card removed");
-                    idle.Restart();
+                    rfPoll.Restart();
                 }
             }
         }
@@ -430,13 +541,18 @@ namespace ChinaHid {
         private static volatile bool cancel;
         private static void Cancel(object sender, ConsoleCancelEventArgs e) { e.Cancel = true; cancel = true; }
         public static void Run(string driver, string host, int port, string mode, bool preferContact, int runSeconds) {
-            if (port < 1 || port > 65535) throw new ArgumentOutOfRangeException("port");
+            Run(driver, host, port, mode, preferContact, runSeconds, 0);
+        }
+        public static void Run(string driver, string host, int port, string mode, bool preferContact, int runSeconds, int directPort) {
+            if (port < 1 || port > 65535 || directPort < 0 || directPort > 65535) throw new ArgumentOutOfRangeException("port");
             IPAddress address;
             if (host == "localhost") address = IPAddress.Loopback;
             else if (!IPAddress.TryParse(host, out address) || !IPAddress.IsLoopback(address))
-                throw new ArgumentException("VPCD must use a loopback address (transport is unauthenticated)");
+                throw new ArgumentException("VPCD must use a loopback address");
+            if (directPort == port) throw new ArgumentException("Diagnostic port must differ from VPCD");
             bool acquired = false;
             using (Mutex mutex = new Mutex(false, @"Global\ChinaHid.Decard.USB100")) {
+                TcpListener directServer = null;
                 try {
                     try { acquired = mutex.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
                     if (!acquired) throw new InvalidOperationException("Another DeCard bridge owns this reader");
@@ -444,26 +560,39 @@ namespace ChinaHid {
                     Stopwatch lifetime = Stopwatch.StartNew();
                     Func<bool> stop = delegate { return cancel || (runSeconds > 0 && lifetime.Elapsed.TotalSeconds >= runSeconds); };
                     Console.WriteLine("DeCard mode=" + mode + ", priority=" + (preferContact ? "Contact" : "Rf") + ", VPCD=" + address + ":" + port);
-                    Console.WriteLine("Single virtual slot. Contact polling 250ms; RF idle polling 400ms with 40ms retry. APDU payload logging is disabled.");
+                    Console.WriteLine("RF startup/after-APDU grace 400ms; idle polling 200ms; removal retry 40ms. APDU payload logging is disabled.");
+                    if (directPort != 0) {
+                        directServer = new TcpListener(IPAddress.Loopback, directPort); directServer.Start();
+                        Console.WriteLine("Exclusive diagnostic channel 127.0.0.1:" + directPort + "; Windows VPCD is disconnected in this mode.");
+                    }
+                    bool readerAnnounced = mode == "Rf";
                     string lastError = null; Stopwatch errorClock = Stopwatch.StartNew();
                     while (!stop()) {
                         try {
                             using (Decard card = new Decard()) {
-                                bool activated = false;
-                                // Periodically reopen even if a removed USB device reports "no card".
-                                for (int attempt = 0; attempt < 4 && !stop(); attempt++) {
-                                    if (card.Activate(mode, preferContact)) { activated = true; break; }
-                                    Thread.Sleep(250);
-                                }
+                                Console.WriteLine("Reader backend=" + card.Backend);
+                                if (!readerAnnounced) { card.Beep(); readerAnnounced = true; }
+                                while (!stop() && !card.Activate(mode, preferContact)) Thread.Sleep(50);
                                 if (stop()) break;
-                                if (!activated) { Thread.Sleep(250); continue; }
-                                using (TcpClient client = new TcpClient(address.AddressFamily)) {
+                                // Signal card detection immediately; do not wait for the host connection.
+                                card.Beep();
+                                TcpClient connection;
+                                if (directServer != null) {
+                                    while (!stop() && !directServer.Pending()) Thread.Sleep(10);
+                                    if (stop()) break;
+                                    connection = directServer.AcceptTcpClient();
+                                } else {
+                                    connection = new TcpClient(address.AddressFamily);
+                                    try {
+                                        IAsyncResult pending = connection.BeginConnect(address, port, null, null);
+                                        using (WaitHandle wait = pending.AsyncWaitHandle) {
+                                            if (!wait.WaitOne(3000)) throw new LinkException("VPCD connection deadline");
+                                            connection.EndConnect(pending);
+                                        }
+                                    } catch { connection.Close(); throw; }
+                                }
+                                using (TcpClient client = connection) {
                                     client.NoDelay = true;
-                                    IAsyncResult connection = client.BeginConnect(address, port, null, null);
-                                    using (WaitHandle wait = connection.AsyncWaitHandle) {
-                                        if (!wait.WaitOne(3000)) throw new LinkException("VPCD connection deadline");
-                                        client.EndConnect(connection);
-                                    }
                                     Console.WriteLine("Connected medium=" + card.Medium + " ATR=" + BitConverter.ToString(card.Atr));
                                     new Session(card).Run(client, stop, 3000);
                                 }
@@ -477,9 +606,10 @@ namespace ChinaHid {
                                 Console.WriteLine("VPCD unavailable: " + ex.Message); lastError = ex.Message; errorClock.Restart();
                             }
                         }
-                        if (!stop()) Thread.Sleep(500);
+                        if (!stop()) Thread.Sleep(100);
                     }
                 } finally {
+                    if (directServer != null) directServer.Stop();
                     Console.CancelKeyPress -= Cancel;
                     if (acquired) mutex.ReleaseMutex();
                 }
@@ -487,4 +617,3 @@ namespace ChinaHid {
         }
     }
 }
-

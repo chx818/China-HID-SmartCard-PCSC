@@ -5,9 +5,13 @@
 > 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)** 等设备，将私有 HID 协议秒变 Windows 标准系统智能卡读卡器！
 
 
-> **2026-10-04 德卡重构更新**：三个德卡入口已统一收敛至高性能底层引擎 `scripts/DecardBridge.cs`，彻底修复重复发送 APDU、T=0 数据改写、RF 帧误解析和 TCP 半包阻塞等问题；同时完整保留接触式与非接触式的主动即时移卡与重新插卡感知。
+> **2026-10-06 德卡 T10 适配与体验优化更新**：
+> - **新版 T10 (`VID_0471&PID_A133`) 自动兼容**：自动识别硬件并降级调用 `dcrf32.dll` 后端，解决原 `dcic32.dll` 驱动针对新硬件 PID 报错（-32）问题；通过 ISO 14443-A 非接触射频链路实测。
+> - **YubiKey NFC 慢启动保护与响应提速**：针对 YubiKey 等慢启动非接安全元件，保留 **400ms 启动及业务后安静保护期**，防止高频探测导致卡片反复断联死循环；进入稳定空闲后采用 **200ms 轮询 + 40ms 移卡复查**，兼顾低延迟响应与链路稳定。
+> - **即时感应蜂鸣提示**：读卡器成功感应并激活卡片瞬间**立即蜂鸣一声**，提供直观物理反馈，无需等待上层软件连接；原脚本连接读卡器就绪蜂鸣完整保留。
+> - **独占诊断通道**：默认专供 Windows VPCD 虚拟读卡器；需要独立 APDU 调试时可显式传入 `-DirectPort <端口>` 开启独占诊断模式。
 >
-> 统一入口是**单虚拟卡位**，默认接触优先；两张卡同时放置时，使用 `start_decard_rf.bat` 或 `start_decard_unified.bat -Priority RfFirst` 读取非接卡。三个入口共享一台设备的互斥锁，不能同时运行。RF 保留原来的约 400ms 空闲 I-block 探测和 40ms 失败复查；确认失联后主动通知 Windows。探针与完整业务交换串行，不在 APDU/WTX/分块过程中插入。默认不记录 APDU 载荷。
+> 统一入口是**单虚拟卡位**，默认接触优先；两张卡同时放置时，使用 `start_decard_rf.bat` 或 `start_decard_unified.bat -Priority RfFirst` 读取非接卡。多个入口共享硬件互斥锁，防止多进程冲突。默认不记录敏感 APDU 载荷。
 
 ---
 
@@ -80,9 +84,9 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 
 | 启动脚本 (BAT) | 适用硬件型号 | 工作模式 | 核心特点与使用场景 |
 | :--- | :--- | :--- | :--- |
-| **`start_decard_unified.bat`** | 德卡 T6 双界面（本轮实测）<br>T10/单界面需另行验收 | 单卡位自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；只在建立新会话时选择卡位。当前验收覆盖只读 APDU、复位、分块及连接恢复。 |
-| **`start_decard_rf.bat`** | 德卡 T6 非接区（本轮实测） | 固定非接触 RF | ISO 14443-A/ISO-DEP。空闲约 400ms 检测移卡并主动通知 Windows；不支持 Type B、10 字节 UID 或存储卡伪 APDU。独占整台 T6 的 SDK 访问。 |
-| **`start_decard_contact.bat`** | 德卡 T6 接触槽（本轮实测） | 固定接触位 | 接触状态约 250ms 轮询。本轮实测 T=0；T=1 仅离线测试。T=0 保留原有 SDK 命令映射和扩展命令转交行为。密钥生成及长耗时业务未验收。 |
+| **`start_decard_unified.bat`** | 德卡 T6 双界面<br>德卡 T10（新版 A133 非接已支持） | 单卡位自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；只在建立新会话时选择卡位。支持 T6 双界面及 T10 非接。 |
+| **`start_decard_rf.bat`** | 德卡 T6 / T10 非接区（实机验证） | 固定非接触 RF | ISO 14443-A/ISO-DEP。保留 400ms 慢启动保护，稳定后约 200ms 轮询并主动通知 Windows；已实测标准 CPU 卡及 YubiKey 5 NFC。独占整台设备的 SDK 访问。 |
+| **`start_decard_contact.bat`** | 德卡 T6 接触槽（实机验证） | 固定接触位 | 接触状态约 250ms 轮询。T=0 经实机验证（T=1 离线测试）。注：T10 接触槽因厂商驱动协议差异暂未开放。 |
 | **`start_feitian_scr501.bat`** | 飞天 SCR501<br>(ROCKEY 531) | 专用非接触中继<br>(`RK501API.dll`) | **⚠️ 明确说明：目前仅实现非接触（挥卡）界面可用！**<br>基于飞天诚信官方动态库，内置防掉卡去抖看门狗，稳定读取各类非接 CPU 卡、JavaCard 与 FIDO Key。 |
 | **`test_gp.bat`** | 通用诊断 | GlobalPlatformPro | 自动探测并调用 `gp.exe` 连通 `Virtual PCD`，打印卡片内的安全域、AID 与 Applet 列表，一键测试链路是否畅通。 |
 

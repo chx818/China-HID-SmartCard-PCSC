@@ -32,3 +32,9 @@ tests/
 REVIEW-*.md
 PRESENCE-*.md
 *.zh-CN.md
+VID_*.md
+vid_*.md
+*AUDIT*.md
+*audit*.md
+T10_AUDIT_*.md
+
