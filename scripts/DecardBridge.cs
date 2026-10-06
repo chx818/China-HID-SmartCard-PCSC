@@ -40,9 +40,13 @@ namespace ChinaHid {
             return (byte)((cla & 0x80) != 0 ? (cla & 3) : (cla & 0xEF));
         }
         public static byte[] Contact(byte[] command, int protocol, Func<byte[], byte[]> exchange) {
+            return Contact(command, protocol, exchange, Int16.MaxValue);
+        }
+        public static byte[] Contact(byte[] command, int protocol, Func<byte[], byte[]> exchange, int nativeLimit) {
             if (!Valid(command)) return Status(0x67, 0);
             if (command.Length > Int16.MaxValue) return Status(0x67, 0);
             if (protocol == 1) {
+                if (command.Length > nativeLimit) return Status(0x67, 0);
                 return Checked(exchange((byte[])command.Clone()));
             }
             if (protocol != 0) throw new LinkException("Unsupported contact protocol");
@@ -55,6 +59,7 @@ namespace ChinaHid {
             else if (case4) c = Slice(c, 0, c.Length - 1);
             // T6 T=0 GET RESPONSE has a 256-byte receive boundary: request <=128 per TPDU.
             if (automatic && case2 && c[1] == 0xC0 && le > 128) c[4] = 128;
+            if (c.Length > nativeLimit) return Status(0x67, 0);
             byte[] r = Checked(exchange(c));
             // A 6C status can correct Le only when the original APDU actually has a Le-only TPDU.
             if (automatic && case2 && r.Length == 2 && r[0] == 0x6C) {
@@ -88,6 +93,43 @@ namespace ChinaHid {
                 }
             }
             throw new LinkException("GET RESPONSE limit exceeded");
+        }
+    }
+
+    public sealed class ContactAtr {
+        public int Protocol { get; private set; }
+        public static ContactAtr Parse(byte[] atr) {
+            if (atr == null || atr.Length < 2 || atr.Length > 33 || (atr[0] != 0x3B && atr[0] != 0x3F))
+                throw new LinkException("Invalid contact ATR");
+            int cursor = 2, y = atr[1] >> 4, group = 1, firstProtocol = -1, specificProtocol = -1;
+            int sdkProtocol = 0; bool tck = false, crc = false;
+            while (y != 0) {
+                for (int bit = 1; bit <= 4; bit <<= 1) {
+                    if ((y & bit) == 0) continue;
+                    if (cursor >= atr.Length) throw new LinkException("Truncated contact ATR interface bytes");
+                    byte value = atr[cursor++];
+                    if (group == 2 && bit == 1) specificProtocol = value & 15;
+                    if (group == 3 && bit == 4) crc = (value & 1) != 0;
+                }
+                if ((y & 8) == 0) break;
+                if (cursor >= atr.Length) throw new LinkException("Truncated contact ATR TD byte");
+                byte td = atr[cursor++]; int protocol = td & 15;
+                if (group == 1) sdkProtocol = protocol == 1 ? 1 : 0;
+                if (firstProtocol < 0 && protocol != 15) firstProtocol = protocol;
+                if (protocol != 0) tck = true;
+                y = td >> 4; group++;
+            }
+            int expected = cursor + (atr[1] & 15) + (tck ? 1 : 0);
+            if (expected != atr.Length) throw new LinkException("Contact ATR length mismatch");
+            if (tck) {
+                byte xor = 0; for (int i = 1; i < atr.Length; i++) xor ^= atr[i];
+                if (xor != 0) throw new LinkException("Contact ATR checksum mismatch");
+            }
+            int selected = specificProtocol >= 0 ? specificProtocol : firstProtocol < 0 ? 0 : firstProtocol;
+            if (selected != 0 && selected != 1) throw new LinkException("Unsupported contact protocol " + selected);
+            if (selected != sdkProtocol) throw new LinkException("ATR protocol requires negotiation unsupported by packaged dcrf32");
+            if (selected == 1 && crc) throw new LinkException("Packaged dcrf32 T=1 supports LRC, not ATR-requested CRC");
+            return new ContactAtr { Protocol = selected };
         }
     }
 
@@ -130,10 +172,12 @@ namespace ChinaHid {
         // Long operations that keep responding with WTX must not be cut off at 30 seconds.
         // The SDK retains its per-exchange timeout; optional total deadlines are opt-in.
         public int DeadlineMs = 0;
-        public IsoDep(Ats ats, Func<byte[], byte, byte[]> exchange) {
+        public IsoDep(Ats ats, Func<byte[], byte, byte[]> exchange) : this(ats, exchange, 250) { }
+        public IsoDep(Ats ats, Func<byte[], byte, byte[]> exchange, int maxInf) {
+            if (maxInf < 1 || maxInf > 250) throw new ArgumentOutOfRangeException("maxInf");
             this.exchange = exchange;
-            // FSC includes PCB and CRC. The DLL strips CRC and has a one-byte length.
-            chunk = Math.Min(250, ats.FrameSize - 3);
+            // FSC includes PCB and CRC; the backend also has its own envelope limit.
+            chunk = Math.Min(maxInf, ats.FrameSize - 3);
         }
         private byte[] Exchange(byte[] frame, Stopwatch clock, ref int blocks, ref int wtx, bool presence) {
             byte initialTimeout = presence && !StartupPresence ? (byte)2 : (byte)10;
@@ -246,7 +290,7 @@ namespace ChinaHid {
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Pro_Reset(IntPtr d, out byte len, [Out] byte[] b);
         [DllImport("dcic32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short IC_Pro_Commandsource(IntPtr d, byte len, byte[] c, out byte n, [Out] byte[] b, byte timeout);
 
-        // dcrf32.dll (A133 RF backend; contact support requires separate qualification)
+        // dcrf32.dll (A133 contact slot 0x0C and RF)
         [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_getver(int d, [Out] byte[] b);
         [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern int dc_init(short port, int baud);
         [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_exit(int d);
@@ -260,6 +304,11 @@ namespace ChinaHid {
         [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_select2(int d, uint uid, out byte sak);
         [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_pro_reset(int d, out byte len, [Out] byte[] b);
         [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_pro_commandsource(int d, byte len, byte[] c, out byte n, [Out] byte[] b, byte timeout);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_setcpu(int d, byte slot);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_cpureset(int d, out byte n, [Out] byte[] b);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_cpudown(int d);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_cpuapdusource(int d, byte len, byte[] c, out byte n, [Out] byte[] b);
+        [DllImport("dcrf32.dll", CallingConvention=CallingConvention.StdCall)] internal static extern short dc_cpuapdu(int d, byte len, byte[] c, out byte n, [Out] byte[] b);
     }
 
     public sealed class Decard : ICard {
@@ -268,6 +317,8 @@ namespace ChinaHid {
         private static bool icLoaded, rfLoaded;
         private static string loadedDirectory;
         private bool rfFieldOn;
+        private bool contactPowered;
+        private short contactProbeCode;
         private Stopwatch rfActivated = new Stopwatch();
         private Stopwatch deviceHealth = Stopwatch.StartNew();
         private bool isYubiKey;
@@ -322,10 +373,22 @@ namespace ChinaHid {
         }
         private bool Contact() {
             if (useDcrf) {
-                // This A133 reader returned 100 for dc_card_status. Its contact-slot API,
-                // protocol and removal semantics have not been established. Do not reset
-                // a SAM slot or report a permanent "present" card in an RF-only backend.
-                return false;
+                Require(Native.dc_setcpu((int)dev, 0x0C), "Contact slot selection");
+                byte n = 0; byte[] b = new byte[256];
+                short reset = Native.dc_cpureset((int)dev, out n, b);
+                if (reset == 193) { contactPowered = false; return false; }
+                Require(reset, "Contact reset");
+                contactPowered = true; // Even a malformed ATR needs power-off during cleanup.
+                byte[] atr = Apdu.Slice(b, 0, n);
+                protocol = ContactAtr.Parse(atr).Protocol;
+                // On the tested A133 firmware an empty 0x7D transfer returns 1 when
+                // powered, and a different code when down/lost. No APDU bytes are sent.
+                // Calibrate only after a valid ATR, never interpret a generic error as "present".
+                byte ignored; byte[] probeBuffer = new byte[256];
+                short probe = Native.dc_cpuapdusource((int)dev, 0, new byte[0], out ignored, probeBuffer);
+                if (probe != 1) throw new LinkException("Unsupported contact presence response: " + probe);
+                contactProbeCode = probe;
+                Atr = atr; Medium = "Contact"; return true;
             } else {
                 short status = Native.IC_Status(dev);
                 if (status == 1) return false;
@@ -334,6 +397,7 @@ namespace ChinaHid {
                 Require(Native.IC_Down(dev), "Contact power off");
                 byte n; byte[] b = new byte[256];
                 Require(Native.IC_CpuReset(dev, out n, b), "Contact reset");
+                contactPowered = true;
                 if (n < 2 || n > 33) throw new LinkException("Invalid contact ATR length");
                 protocol = Native.IC_CpuGetProtocol(dev);
                 if (protocol != 0 && protocol != 1) throw new LinkException("Invalid contact protocol: " + protocol);
@@ -369,15 +433,13 @@ namespace ChinaHid {
             Require(useDcrf ? Native.dc_pro_reset((int)dev, out n, b) : Native.IC_Pro_Reset(dev, out n, b), "RF RATS");
             Ats ats = Ats.Parse(Apdu.Slice(b, 0, n));
             isYubiKey = System.Text.Encoding.ASCII.GetString(b, 0, n).IndexOf("YubiKey", StringComparison.Ordinal) >= 0;
-            Atr = ats.Atr; rf = new IsoDep(ats, RfRaw); rf.StartupPresence = isYubiKey;
+            Atr = ats.Atr; rf = new IsoDep(ats, RfRaw, useDcrf ? 248 : 250); rf.StartupPresence = isYubiKey;
             rfActivated.Restart(); Medium = "Rf"; return true;
         }
         public bool Activate(string mode, bool preferContact) {
             bool wasRf = rf != null;
             Atr = new byte[0]; Medium = "None"; rf = null;
             if (wasRf) rfFieldOn = false;
-            if (mode == "Contact" && useDcrf)
-                throw new NotSupportedException("This dcrf32 backend is qualified for RF only; contact protocol/removal support is not verified");
             if (deviceHealth.ElapsedMilliseconds >= 3000) {
                 byte[] version = new byte[256];
                 Require(useDcrf ? Native.dc_getver((int)dev, version) : Native.IC_ReadVer(dev, version), "USB reader health check");
@@ -388,7 +450,13 @@ namespace ChinaHid {
             if (mode != "Auto") throw new ArgumentException("Unknown card mode");
             // A failed/unsupported preferred card must not starve the other occupied slot.
             try { if (preferContact ? Contact() : Rf()) return true; }
-            catch (LinkException) { Atr = new byte[0]; rf = null; }
+            catch (LinkException) {
+                Atr = new byte[0]; rf = null;
+                if (contactPowered) {
+                    Require(useDcrf ? Native.dc_cpudown((int)dev) : Native.IC_Down(dev), "Failed contact activation cleanup");
+                    contactPowered = false;
+                }
+            }
             return preferContact ? Rf() : Contact();
         }
         public void Reset() {
@@ -402,17 +470,35 @@ namespace ChinaHid {
         }
         public void PowerOff() {
             Atr = new byte[0]; rf = null;
-            if (Medium == "Contact") Require(Native.IC_Down(dev), "Contact power off");
-            else if (Medium == "Rf" || rfFieldOn) {
-                if (useDcrf) Require(Native.dc_reset((int)dev, 0), "RF field off");
-                else Require(Native.IC_ResetMifare(dev, 20), "RF session reset");
-                rfFieldOn = false;
+            try {
+                if (Medium == "Contact" || contactPowered) {
+                    contactPowered = false;
+                    Require(useDcrf ? Native.dc_cpudown((int)dev) : Native.IC_Down(dev), "Contact power off");
+                }
+            } finally {
+                // Contact may win after RF-first detection already powered an empty RF field.
+                if (Medium == "Rf" || rfFieldOn) {
+                    rfFieldOn = false;
+                    if (useDcrf) Require(Native.dc_reset((int)dev, 0), "RF field off");
+                    else Require(Native.IC_ResetMifare(dev, 20), "RF session reset");
+                }
             }
+        }
+        private short ContactProbe() {
+            byte n = 0; byte[] b = new byte[256];
+            return Native.dc_cpuapdusource((int)dev, 0, new byte[0], out n, b);
         }
         public bool ContactPresent() {
             if (Medium != "Contact") return true;
-            if (useDcrf) throw new LinkException("Unqualified contact backend");
-            return Native.IC_Status(dev) == 0;
+            if (!useDcrf) return Native.IC_Status(dev) == 0;
+            // No live application exists after host OFF, so reset is allowed only here.
+            // During an active session presence checks never reset or SELECT the card.
+            if (!contactPowered) return Contact();
+            if (ContactProbe() == contactProbeCode) return true;
+            Thread.Sleep(40);
+            if (ContactProbe() == contactProbeCode) return true;
+            contactPowered = false;
+            return false;
         }
         public bool RfPresent() {
             if (Medium != "Rf") return true;
@@ -424,16 +510,29 @@ namespace ChinaHid {
             return rf.Present();
         }
         private byte[] ContactRaw(byte[] c) {
-            if (useDcrf) throw new LinkException("Cannot send a dcrf32 handle to dcic32");
+            if (useDcrf) {
+                // Keep the complete legacy HID message (APDU + 5 framing bytes) <=255.
+                // 254-byte APDUs crashed this packaged DLL in an isolated live test;
+                // 250-byte transfers were verified. T=1 adds another 4 protocol bytes.
+                int limit = protocol == 1 ? 246 : 250;
+                if (c.Length > limit) throw new LinkException("Contact SDK length exceeds " + limit);
+                byte n = 0; byte[] b = new byte[256];
+                short ret = protocol == 1
+                    ? Native.dc_cpuapdu((int)dev, (byte)c.Length, c, out n, b)
+                    : Native.dc_cpuapdusource((int)dev, (byte)c.Length, c, out n, b);
+                Require(ret, "Contact APDU (outcome unknown)");
+                if (n < 2) throw new LinkException("Invalid contact response length " + n);
+                return Apdu.Slice(b, 0, n);
+            }
             if (c.Length > Int16.MaxValue) throw new LinkException("Native send length exceeded");
-            // SDK lacks a receive capacity argument. Reserve its full 16-bit output range.
-            byte[] b = new byte[65536]; short n;
-            Require(Native.IC_CpuApduSourceEXT(dev, checked((short)c.Length), c, out n, b), "Contact APDU (outcome unknown)");
-            if (n < 2) throw new LinkException("Invalid native response length");
-            return Apdu.Slice(b, 0, n);
+            byte[] buffer = new byte[65536]; short length;
+            Require(Native.IC_CpuApduSourceEXT(dev, checked((short)c.Length), c, out length, buffer), "Contact APDU (outcome unknown)");
+            if (length < 2) throw new LinkException("Invalid native response length");
+            return Apdu.Slice(buffer, 0, length);
         }
         private byte[] RfRaw(byte[] c, byte timeout) {
-            if (c.Length > 255) throw new LinkException("RF native send length exceeded");
+            // dcrf32 wraps a frame in six legacy bytes (timeout/length + envelope).
+            if (c.Length > (useDcrf ? 249 : 255)) throw new LinkException("RF native send length exceeded");
             byte n; byte[] b = new byte[256];
             short ret = useDcrf
                 ? Native.dc_pro_commandsource((int)dev, checked((byte)c.Length), c, out n, b, timeout)
@@ -443,7 +542,12 @@ namespace ChinaHid {
         }
         public byte[] Transmit(byte[] c) {
             if (Atr.Length == 0) throw new LinkException("Card is not powered");
-            if (Medium == "Contact") return Apdu.Contact(c, protocol, ContactRaw);
+            if (Medium == "Contact") {
+                // Do not silently split a signed/chained application command. Reject an
+                // unsupported extended form/length before dispatch, preserving the session.
+                if (useDcrf && c != null && c.Length > 5 && c[4] == 0) return Apdu.Status(0x67, 0);
+                return Apdu.Contact(c, protocol, ContactRaw, useDcrf ? (protocol == 1 ? 246 : 250) : Int16.MaxValue);
+            }
             if (rf == null) throw new LinkException("RF card not activated");
             return rf.Transmit(c);
         }

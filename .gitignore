@@ -36,5 +36,7 @@ VID_*.md
 vid_*.md
 *AUDIT*.md
 *audit*.md
-T10_AUDIT_*.md
+T10_*.md
+*MERGE*.md
+*merge*.md
 
