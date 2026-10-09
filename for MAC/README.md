@@ -1,31 +1,23 @@
-# China-HID-SmartCard-PCSC (macOS 原生驱动与 PC/SC 桥接套件)
+# macOS 实验性支持与测试工具
 
-> **Universal macOS PC/SC Bridges for Chinese Driverless USB-HID Smart Card Readers**  
-> 专为 macOS（Apple Silicon M系列 M1~M4 / Intel x86_64）打造的国产“免驱 HID”智能卡读卡器原生驱动与桥接工具箱。  
-> 彻底摆脱 Windows 32 位 DLL 依赖，采用跨平台原生 USB-HID 协议栈与系统级 PC/SC 桥接架构。
+> **内部测试与调试说明**  
+> 本文件夹包含在 macOS（Apple Silicon / Intel）上通过 USB-HID 访问德卡（DeCard）和飞天（Feitian）读卡器的实验性脚本与测试工具。当前仅作本地调试和自用验证，非正式发布版本。
 
 ---
 
-## 🌟 核心特性与架构升级
+## 🛠️ 主要内容与机制说明
 
-在 Windows 版本中，中继依赖厂商官方提供的 32 位专有动态库（`dcic32.dll` / `RK501API.dll`）。  
-在 macOS 上，本项目通过**静态逆向与汇编反编译**，直接提取出底层的 **USB-HID 链路层多报文传输协议（Multi-report Feature Reports）与 ISO 14443-4 T=CL 射频状态机**，实现了：
+由于 macOS 上无法使用 Windows 32 位专有动态库（`dcic32.dll` 等），本目录通过直接调用系统的 `libhidapi` 进行底层 HID 特征报文交互：
 
-1. **纯原生 Python + `libhidapi` 驱动**：
-   - 零 Windows DLL 依赖，零 Wine/虚拟机依赖。
-   - 原生支持 **Apple Silicon (M1/M2/M3/M4, ARM64)** 与 **Intel (x86_64)**。
-2. **多报文重组与 ISO 14443-4 T=CL 完整实现**：
-   - 完整支持等待时间扩展 `S(WTX)`（处理大算力加密操作）。
-   - 完整支持报文分片与重组 `R(ACK)` 链路层级联（处理 PIV/OpenPGP 长证书与长 FCI 回复）。
-   - 自动处理多 Feature Report 汇编流（突破单报告 31 字节硬件限制）。
-3. **免驱直连 GlobalPlatformPro (`./gp_mac.sh`)**：
-   - **直连 JavaCard / 跑 APDU，跳过 VPCD 和系统驱动**！
-   - 内置纯 Java Direct BIBO 桥接器（`tools/GPDirect.java`），直接对接官方 `gp.jar`。
-   - 完整支持 SCP02 / SCP03 双向加密认证，秒级列出、安装、卸载 Applet！
-4. **离线仿真模式 (`--mock`)**：
-   - 内置 **Virtual JavaCard 仿真卡**，即使**没有插入拓展坞或读卡器**，也能进行全流程 APDU、ATR 探测与软件调试！
-5. **系统级全兼容模式 (`ifd-vpcd.bundle`)**：
-   - 接入 macOS `SmartCardServices`，让 **Chrome/Safari (WebAuthn/Passkey)**、**GnuPG (`gpg --card-status`)** 和 **OpenSC** 将其识别为标准合规读卡器。
+1. **Python 原生 HID 驱动 (`mac_drivers/`)**：
+   - 包含针对德卡 T6/T10、飞天 SCR501 的 USB-HID 链路解析；
+   - 支持非接触（ISO 14443-4 T=CL）与接触卡槽（ISO 7816-3 T=0）。
+2. **测试脚本与服务 (`scripts/` 与根目录 `.sh`)**：
+   - `start_decard_mac.sh` / `start_decard_contact_mac.sh`：本地 TCP 桥接服务；
+   - `gp_mac.sh`：调用 `gp.jar` 直接测试卡片 APDU 通信；
+   - `tools/gp_lite.py`：纯 Python 的简单调试小工具。
+3. **离线测试 (`--mock`)**：
+   - 未插读卡器时可通过内置的 Mock 模式进行逻辑验证。
 
 ---
 
