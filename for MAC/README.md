@@ -135,7 +135,8 @@ security list-smartcards
 
 ```text
 ├── gp_mac.sh                       # GlobalPlatformPro macOS 直连启动器（免系统驱动）
-├── start_decard_mac.sh             # 德卡 T6/T10 macOS 桥接后台服务
+├── start_decard_mac.sh             # 德卡 T6/T10 macOS 双界面桥接服务（接触+非接智能感知）
+├── start_decard_contact_mac.sh     # 德卡 T6/T10 macOS 接触式卡槽专属桥接服务（ISO 7816）
 ├── start_feitian_mac.sh            # 飞天 SCR501 macOS 桥接后台服务
 ├── test_gp_mac.sh                  # 一键端到端全链路诊断测试
 │
