@@ -2,8 +2,20 @@
 
 > **Universal Windows PC/SC Bridges for Chinese Proprietary "Driverless" USB-HID Smart Card Readers**  
 > 专为国产“免驱 HID”智能卡读卡器打造的系统级 PC/SC 虚拟驱动映射工具箱。  
-> 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)** 等设备，将私有 HID 协议秒变 Windows 标准系统智能卡读卡器！
+> 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)**、**北京握奇 (Watchdata W2160 四合一版 W8298 / W5181 Plus / 串口纯非接版 CRW-Xs)** 等设备，将私有协议秒变 Windows 标准系统智能卡读卡器！
 
+
+> **2026-10-13 握奇数据 (Watchdata) USB 读卡器原生支持更新**：
+> - **四合一版 W2160（代号 W8298，`VID_163C&PID_0A1F`）** 与 **W5181 Plus（`VID_163C&PID_0A28`）** 深度适配。
+> - **纯 Python 异步重叠 I/O 直驱**：基于原生 65 字节 HID 报文封装与动态分包重组，无需第三方闭源 DLL，跨平台低耦合。
+> - **卡槽精细化隔离与安全保护**：原生中继用户接触卡槽 (`NAD=0x12`) 与非接触射频区 (`NAD=0x15`)，主动过滤内部 SAM (`NAD=0x13/0x14/0x16/0x17`)、磁条卡槽 (`NAD=0x1A`) 与扫码枪键盘接口 (`MI_00`)。
+> - **三大应用场景实测通过**：通过 FIDO2 / WebAuthn (CTAP2 CBOR 长响应分片接收与探测)、PIV（公钥、CHUID、CCC 读取）、OpenPGP（卡片数据、扩展能力识别）及 PBOC 银行卡完整交互。
+> - **三启动入口**：`start_watchdata_unified.bat`（二合一单卡位，默认接触优先，支持 `-Priority RfFirst`）、`start_watchdata_contact.bat`（接触式独立位）、`start_watchdata_rf.bat`（非接触独立位）。
+>
+> ⚠️ **关于串口版纯非接 W2160 (CRW-Xs) 的特别说明**：
+> - 早期退役的**纯非接版 W2160（CRW-Xs，单片机 uPSD3422E + MFRC531）**是一个**特殊的物理存在**：它不是 USB HID 设备，而是标准的 **RS-232 串口设备 (9600 8E1, NAD=12)**！
+> - 它的硬件架构、通信分帧与 USB 版完全不同，**不能运行 USB 脚本**。为此我们为其单独打造了串口中继驱动：运行根目录下的 **`start_w2160_serial.bat`** 即可自动枚举并选择 COM 口接入系统。
+> - 完整硬件拆解分析、协议细节、指令限制详见独立文档：[W2160 串口版操作说明](W2160（CRW-Xs）/SERIAL_README.md)。
 
 > **2026-10-06 德卡 T10 适配与体验优化更新**：
 > - **新版 T10 (`VID_0471&PID_A133`) 自动兼容**：自动识别硬件并降级调用 `dcrf32.dll` 后端，解决原 `dcic32.dll` 驱动针对新硬件 PID 报错（-32）问题；通过 ISO 14443-A 非接触射频链路实测。
@@ -72,10 +84,8 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 
 ## 🔮 下一步路线图 (Roadmap)
 
-1. **握奇数据 (Watchdata) W2160 单界面（纯非接触挥卡）版适配**：
-   - 握奇 W2160 在二手市场货源极其庞大且价格更低（白菜价），外观小巧轻薄。
-   - 作者下一步将重点攻克 W2160 的私有 HID 通信协议，给卡友们提供多一个超低成本挥卡选择！
-2. **华大 HD100 双界面安全驱动**：待新机抵达后重新验证并入库。
+1. **华大 HD100 双界面安全驱动**：已深入逆向分析官方 SDK（`SSSE32.dll`）中的多包接收与长 APDU 机制，掌握了防变砖保护策略与分片代理方案，待新机抵达后重新实机验证入库。
+2. **更多国产“免驱”型号适配**：欢迎卡友提 Issue 或寄送样机共同折腾！
 
 ---
 
@@ -85,6 +95,10 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 
 | 启动脚本 (BAT) | 适用硬件型号 | 工作模式 | 核心特点与使用场景 |
 | :--- | :--- | :--- | :--- |
+| **`start_watchdata_unified.bat`** | 握奇 W2160 (W8298) / W5181 Plus | USB 接触+非接 自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；纯 Python 65 字节 HID 驱动，无需外部 DLL。已通过 FIDO2、PIV、OpenPGP、PBOC 验证。 |
+| **`start_watchdata_rf.bat`** | 握奇 W2160 (W8298) / W5181 Plus 非接区 | USB 固定非接触位 (`NAD=0x15`) | 独立非接触射频区，支持长响应自动多包拼接与 FIDO2 CTAP2 认证。 |
+| **`start_watchdata_contact.bat`** | 握奇 W2160 (W8298) / W5181 Plus 接触槽 | USB 固定接触位 (`NAD=0x12`) | 独立用户接触式卡槽，安全过滤内部 SAM。 |
+| **`start_w2160_serial.bat`** | 握奇 W2160 串口版 (CRW-Xs) | 串口纯非接中继 (`9600 8E1`) | **⚠️ 特殊设备**：老款纯非接 RS-232 串口读卡器，自动列出 COM 口供选择；详见 [串口版说明](W2160（CRW-Xs）/SERIAL_README.md)。 |
 | **`start_decard_unified.bat`** | 德卡 T6 / T10 A133 | 单卡位自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；新会话选择卡位。本轮实测 A133 双卡同时在位的两种优先级及独立卡位入口。 |
 | **`start_decard_rf.bat`** | 德卡 T6 / T10 非接区（实机验证） | 固定非接触 RF | ISO 14443-A/ISO-DEP。保留 400ms 慢启动保护，稳定后约 200ms 轮询并主动通知 Windows；已实测标准 CPU 卡及 YubiKey 5 NFC。独占整台设备的 SDK 访问。 |
 | **`start_decard_contact.bat`** | 德卡 T6 / T10 A133 接触槽 | 固定接触位 | A133 T=0 实卡读取、复位和失联通知通过；T=1 仅离线验证。T10 单次 T=0 TPDU 上限 250 字节，超限返回 `6700`；不能任意拆分安全消息。 |
@@ -100,6 +114,10 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 确保已安装并配置好 **BixVReader / VPCD**，设备管理器中已出现虚拟智能卡读卡器。
 
 ### 第二步：运行对应读卡器脚本
+- 如果你使用的是**握奇 USB 读卡器（四合一版 W2160 代号 W8298 / W5181 Plus）**：
+  双击 **`start_watchdata_unified.bat`** 自动选择卡位；固定插卡使用 **`start_watchdata_contact.bat`**，固定挥卡使用 **`start_watchdata_rf.bat`**。
+- 如果你使用的是**握奇 W2160 串口版（老款纯非接 CRW-Xs）**：
+  双击 **`start_w2160_serial.bat`**，根据提示选择对应的 COM 端口即可。
 - 如果你使用的是**德卡 T6 或 T10 A133**：
   双击 **`start_decard_unified.bat`** 自动选择卡位；固定插卡使用 **`start_decard_contact.bat`**，固定非接使用 **`start_decard_rf.bat`**。
 - 如果你使用的是**飞天 SCR501（挥非接卡）**：
@@ -134,8 +152,11 @@ Connected medium=Contact ATR=...
 1. **绝对不要买“深度定制版 / 专网加密锁死版”**：
    - 某些标有“XX省公安专网”、“XX税控专用终端”、“XX银行特种机”且卖家声明“需要插加密狗或专网认证”的机器不要买！这些设备可能在单片机固件层面锁死了非公开通信密钥，甚至修改了 USB VID/PID。
 2. **认准通用的公版型号**：
-   - **德卡**：认准 `T6`、`T6-URM`（USB 免驱版）、`T10`（USB 双界面）。
-   - **飞天诚信**：认准 `SCR501`、`ROCKEY 531`（PID 通常为 `0603`，HID 免驱版）。
+   - **北京握奇 (Watchdata)**：
+     - 四合一 USB 版认准 **`W2160`**（内部固件代号 **`W8298`**，`VID_163C&PID_0A1F`，带接触插槽与条码扫码窗）或 **`W5181 Plus`**（`VID_163C&PID_0A28`）。
+     - 纯非接串口版认准 **`W2160 / CRW-Xs`**（带 DB9 串口线与 DC 9V 供电插头，纯非接触）。
+   - **德卡 (DeCard)**：认准 `T6`、`T6-URM`（USB 免驱版）、`T10`（USB 双界面）。
+   - **飞天诚信 (Feitian)**：认准 `SCR501`、`ROCKEY 531`（PID 通常为 `0603`，HID 免驱版）。
 3. **留意硬件成色与配件**：
    - 德卡 T6 纯接触版的卡座如果弹片被异物捅变形会导致接触不良；
    - 双界面版请确认非接射频天线板未被外力折损；
@@ -146,7 +167,7 @@ Connected medium=Contact ATR=...
 ## 🛠️ 常见问题 (FAQ)
 
 ### Q1: 运行脚本时提示 `dcic32.dll` 或 `RK501API.dll` 无法加载（BadImageFormatException）？
-**A**: 国产硬件厂商的历史 SDK 动态库均为 **32 位 (x86)** 架构。本项目的 BAT 脚本与 PowerShell 脚本均内置了检测与自适应机制，若当前位于 64 位环境，会自动调用 `SysWOW64\WindowsPowerShell` 重新以 32 位宿主启动，无需手动修改系统环境。
+**A**: 国产硬件厂商的历史 SDK 动态库均为 **32 位 (x86)** 架构。本项目的 BAT 脚本与 PowerShell 脚本均内置了检测与自适应机制，若当前位于 64 位环境，会自动调用 `SysWOW64\WindowsPowerShell` 重新以 32 位宿主启动，无需手动修改系统环境。（注：握奇 USB 系列驱动为纯 Python 原生直驱，无此依赖限制）。
 
 ### Q2: 运行 `gpg --card-status` 报错 `scdaemon: card is already checked out / No such device`？
 **A**: Windows 下由于 `CertPropSvc`（证书传播服务）或浏览器可能同时访问智能卡，而 GnuPG 默认以独占（Exclusive）方式打开 PC/SC。
@@ -168,11 +189,30 @@ SmartCard-Bridges/
 │
 ├── README.md                      # 项目说明文档
 ├── LICENSE                        # MIT 开源许可证
+│
+├── start_watchdata_unified.bat    # 🔥 握奇 W2160(W8298)/W5181 Plus 接触+非接 自动桥接
+├── start_watchdata_rf.bat         # 握奇 USB 系列非接触 (RF) 独立桥接
+├── start_watchdata_contact.bat    # 握奇 USB 系列接触式卡槽独立桥接
+├── start_w2160_serial.bat         # 握奇 W2160 老款串口纯非接专用桥接 (CRW-Xs)
+│
 ├── start_decard_unified.bat       # 🔥 德卡 T6/T10 接触+非接 二合一智能桥接
 ├── start_decard_rf.bat            # 德卡双界面 / T10 非接触 (RF) 独立桥接
 ├── start_decard_contact.bat       # 德卡 T6 / T10 接触式卡座独立桥接
 ├── start_feitian_scr501.bat       # 飞天诚信 SCR501 (ROCKEY 531) 专用桥接
 ├── test_gp.bat                    # GlobalPlatformPro 连通性快速验证
+│
+├── watchdata_usb/                 # 握奇 USB 系列纯 Python 直驱驱动模块
+│   ├── bridge.py                  # VPCD 虚拟读卡器协议中继器
+│   ├── card.py                    # 接触与非接触智能卡抽象
+│   ├── protocol.py                # CRW-X 协议帧封装与解包 (65 字节 HID)
+│   ├── reader.py                  # 异步 Overlapped I/O 设备读写器
+│   └── transport.py               # HID 传输层与重叠 I/O 封装
+│
+├── W2160（CRW-Xs）/               # 握奇 W2160 串口纯非接专区
+│   ├── SERIAL_README.md           # 串口版专属使用说明与避坑指引
+│   ├── serial_bridge.py           # 串口 VPCD 桥接中继实现
+│   ├── serial_reader.py           # 串口 CRW-X 读卡器状态机
+│   └── serial_transport.py        # Windows RS-232 串口驱动
 │
 ├── drivers/                       # 提取的官方驱动原生 DLL 与 C 语言头文件
 │   ├── dcic32.dll                 # 德卡接触式 IC 动态库 (x86)
@@ -183,11 +223,16 @@ SmartCard-Bridges/
 │   ├── dcrfrd.dll                 # 德卡非接触 RF 动态库 (x64)
 │   └── RK501API.dll               # 飞天诚信 SCR501 动态库 (x86)
 │
-├── scripts/                       # 核心业务逻辑 PowerShell 脚本
-│   ├── decard_unified_bridge.ps1  # 德卡接触/非接 二合一中继逻辑
-│   ├── decard_rf_bridge.ps1       # 德卡非接独立中继逻辑
-│   ├── decard_contact_bridge.ps1  # 德卡接触式独立中继逻辑 (T6 / T10 通用)
-│   └── feitian_scr501_bridge.ps1  # 飞天 SCR501 独立中继逻辑
+├── scripts/                       # 核心业务逻辑脚本 (PowerShell / Python)
+│   ├── watchdata_unified_bridge.ps1 # 握奇 USB 二合一中继入口
+│   ├── watchdata_rf_bridge.ps1      # 握奇 USB 非接独立中继
+│   ├── watchdata_contact_bridge.ps1 # 握奇 USB 接触独立中继
+│   ├── watchdata_usb_bridge.py      # 握奇 USB Python 核心中继
+│   ├── w2160_serial_bridge.ps1      # 握奇 W2160 串口版中继入口
+│   ├── decard_unified_bridge.ps1    # 德卡接触/非接 二合一中继逻辑
+│   ├── decard_rf_bridge.ps1         # 德卡非接独立中继逻辑
+│   ├── decard_contact_bridge.ps1    # 德卡接触式独立中继逻辑 (T6 / T10 通用)
+│   └── feitian_scr501_bridge.ps1    # 飞天 SCR501 独立中继逻辑
 │
 └── tools/                         # 协议分析逆向与辅助工具
     ├── DeCardReader.cs            # 德卡 C# 完整 P/Invoke 接口封装参考

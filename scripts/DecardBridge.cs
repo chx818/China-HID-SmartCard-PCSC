@@ -618,26 +618,103 @@ namespace ChinaHid {
         public void Run(TcpClient client, Func<bool> stop, int frameTimeout) {
             NetworkStream stream = client.GetStream();
             Stopwatch contactPoll = Stopwatch.StartNew(), idle = Stopwatch.StartNew(), rfPoll = Stopwatch.StartNew();
-            while (!stop()) {
-                if (client.Client.Poll(5000, SelectMode.SelectRead)) {
-                    if (client.Available == 0) throw new EndOfStreamException("VPCD closed");
-                    byte[] payload = Framing.Read(stream, frameTimeout);
-                    byte[] response = Handle(payload);
-                    if (response != null) Framing.Write(stream, response);
-                    // Keep the 400ms quiet period after an APDU/reset; ATR polling must not starve detection.
-                    if (payload.Length != 1 || payload[0] != 4) idle.Restart();
+            SessionTrace trace = new SessionTrace(card.Medium);
+            trace.Peer = Convert.ToString(client.Client.RemoteEndPoint);
+            try {
+                while (!stop()) {
+                    trace.Begin("waiting for host");
+                    if (client.Client.Poll(5000, SelectMode.SelectRead)) {
+                        if (client.Available == 0) {
+                            trace.FailureKind = "peer-eof";
+                            throw new EndOfStreamException("VPCD closed by peer (TCP EOF); card removal was not reported by the bridge");
+                        }
+                        trace.Begin("reading host frame");
+                        byte[] payload = Framing.Read(stream, frameTimeout);
+                        trace.Request(payload);
+                        byte[] response = Handle(payload);
+                        trace.Begin("sending response");
+                        if (response != null) Framing.Write(stream, response);
+                        trace.Complete(response);
+                        // Keep the 400ms quiet period after an APDU/reset; ATR polling must not starve detection.
+                        if (payload.Length != 1 || payload[0] != 4) idle.Restart();
+                    }
+                    if (contactPoll.ElapsedMilliseconds >= ContactPollMs) {
+                        trace.Begin("contact presence check");
+                        if (!card.ContactPresent()) {
+                            trace.FailureKind = "contact-absent";
+                            throw new LinkException("Contact removed");
+                        }
+                        trace.PollDone(false);
+                        contactPoll.Restart();
+                    }
+                    // Startup/business grace and steady polling are separate clocks. Fast idle
+                    // polls never reduce the initial 400ms grace or interrupt an active APDU.
+                    if (card.Medium == "Rf" && idle.ElapsedMilliseconds >= RfQuietMs && rfPoll.ElapsedMilliseconds >= RfIdlePollMs && !stream.DataAvailable) {
+                        trace.Begin("RF presence check");
+                        if (!card.RfPresent()) {
+                            trace.FailureKind = "rf-absent";
+                            throw new LinkException("RF card removed");
+                        }
+                        trace.PollDone(true);
+                        rfPoll.Restart();
+                    }
                 }
-                if (contactPoll.ElapsedMilliseconds >= ContactPollMs) {
-                    if (!card.ContactPresent()) throw new LinkException("Contact removed");
-                    contactPoll.Restart();
-                }
-                // Startup/business grace and steady polling are separate clocks. Fast idle
-                // polls never reduce the initial 400ms grace or interrupt an active APDU.
-                if (card.Medium == "Rf" && idle.ElapsedMilliseconds >= RfQuietMs && rfPoll.ElapsedMilliseconds >= RfIdlePollMs && !stream.DataAvailable) {
-                    if (!card.RfPresent()) throw new LinkException("RF card removed");
-                    rfPoll.Restart();
-                }
+            } catch (Exception ex) {
+                // Keep the original exception and recovery behavior. Only bounded metadata
+                // is added; no APDU bytes, response bytes, PINs or card identifiers are stored.
+                trace.Attach(ex);
+                throw;
             }
+        }
+    }
+
+    internal sealed class SessionTrace {
+        private readonly Stopwatch lifetime = Stopwatch.StartNew();
+        private readonly System.Collections.Generic.Queue<string> frames = new System.Collections.Generic.Queue<string>();
+        private readonly string medium;
+        private string phase = "starting", request = "none";
+        private long phaseStarted, requestStarted, lastCompleted = -1, requestMs;
+        private long contactLast, contactMax, rfLast, rfMax, contactCount, rfCount, requests, responses;
+        internal string Peer = "unknown", FailureKind;
+        internal SessionTrace(string medium) { this.medium = medium; }
+        internal void Begin(string value) { phase = value; phaseStarted = lifetime.ElapsedMilliseconds; }
+        internal void Request(byte[] payload) {
+            request = payload.Length == 1 ? "CTRL(" + payload[0] + ")" : "APDU(len=" + payload.Length + ")";
+            requests++; requestMs = -1; requestStarted = lifetime.ElapsedMilliseconds; Begin("executing " + request);
+        }
+        internal void Complete(byte[] response) {
+            requestMs = lifetime.ElapsedMilliseconds - requestStarted;
+            lastCompleted = lifetime.ElapsedMilliseconds;
+            if (response != null) responses++;
+            if (frames.Count == 8) frames.Dequeue();
+            frames.Enqueue(request + ":" + requestMs + "ms/out=" + (response == null ? 0 : response.Length));
+            Begin("idle");
+        }
+        internal void PollDone(bool rf) {
+            long elapsed = lifetime.ElapsedMilliseconds - phaseStarted;
+            if (rf) { rfCount++; rfLast = elapsed; rfMax = Math.Max(rfMax, elapsed); }
+            else { contactCount++; contactLast = elapsed; contactMax = Math.Max(contactMax, elapsed); }
+            Begin("idle");
+        }
+        internal void Attach(Exception ex) {
+            string kind = FailureKind;
+            if (kind == null) {
+                if (ex is EndOfStreamException) kind = "peer-eof-mid-frame";
+                else if (ex is LinkException) kind = "bridge-or-device-error";
+                else if (ex is SocketException || ex is IOException) kind = "transport-error";
+                else kind = "unexpected-error";
+            }
+            long now = lifetime.ElapsedMilliseconds;
+            SocketException socket = ex as SocketException ?? ex.InnerException as SocketException;
+            string socketCode = socket == null ? "none" : socket.SocketErrorCode.ToString();
+            ex.Data["BridgeSession"] = "kind=" + kind + "; medium=" + medium + "; peer=" + Peer
+                + "; uptime_ms=" + now + "; phase=" + phase + "; phase_ms=" + (now - phaseStarted)
+                + "; last_request=" + request + "; last_request_ms=" + requestMs
+                + "; since_last_completed_ms=" + (lastCompleted < 0 ? -1 : now - lastCompleted)
+                + "; requests=" + requests + "; responses=" + responses + "; socket_error=" + socketCode
+                + "; contact_probe(count/last/max_ms)=" + contactCount + "/" + contactLast + "/" + contactMax
+                + "; rf_probe(count/last/max_ms)=" + rfCount + "/" + rfLast + "/" + rfMax
+                + "; recent=" + String.Join(" | ", frames.ToArray());
         }
     }
 
@@ -703,7 +780,9 @@ namespace ChinaHid {
                             }
                         } catch (IOException ex) {
                             if (lastError != ex.Message || errorClock.ElapsedMilliseconds >= 10000) {
-                                Console.WriteLine("Session ended: " + ex.Message); lastError = ex.Message; errorClock.Restart();
+                                Console.WriteLine("[" + DateTimeOffset.Now.ToString("o") + "] Session ended: " + ex.Message);
+                                if (ex.Data.Contains("BridgeSession")) Console.WriteLine("[Session context] " + ex.Data["BridgeSession"]);
+                                lastError = ex.Message; errorClock.Restart();
                             }
                         } catch (SocketException ex) {
                             if (lastError != ex.Message || errorClock.ElapsedMilliseconds >= 10000) {

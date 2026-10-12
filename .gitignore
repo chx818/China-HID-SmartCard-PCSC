@@ -40,6 +40,9 @@ vid_*.md
 T10_*.md
 *MERGE*.md
 *merge*.md
+VPCD_*.md
+WATCHDATA_*.md
+*CLOSE*.md
 
 # macOS build artifacts
 build_vpcd/
