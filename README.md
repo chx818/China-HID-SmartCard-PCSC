@@ -1,8 +1,13 @@
 # China-HID-SmartCard-PCSC (中国免驱 HID 智能卡读卡器 PC/SC 桥接驱动套件)
 
-> **Universal Windows PC/SC Bridges for Chinese Proprietary "Driverless" USB-HID Smart Card Readers**  
-> 专为国产“免驱 HID”智能卡读卡器打造的系统级 PC/SC 虚拟驱动映射工具箱。  
-> 支持**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)**、**北京握奇 (Watchdata W2160 四合一版 W8298 / W5181 Plus / 串口纯非接版 CRW-Xs)** 等设备，将私有协议秒变 Windows 标准系统智能卡读卡器！
+> 支持**华大集成 (Huada HD-100 带屏与密码键盘)**、**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)**、**北京握奇 (Watchdata W2160 四合一版 W8298 / W5181 Plus / 串口纯非接版 CRW-Xs)** 等设备，将私有协议秒变 Windows 标准系统智能卡读卡器！
+
+
+> **2026-10-21 华大集成 (Huada) HD-100 密码键盘液晶屏双界面读卡器深度适配与涅槃支持**：
+> - **全新实机逆向与安全加固**：彻底告别早期盲扫误触发 Bootloader 擦除的教训，采用基于官方安全协议栈（`SSSE32.dll`）的无损直驱，零风险、零破坏。
+> - **接触与非接双界面完整支持**：接触式插槽（ISO 7816）与非接触射频区（ISO 14443 Type A）自适应接入；接触卡槽支持物理微动开关自动检测插拔。
+> - **硬件级 250 字节 APDU 边界自动突破**：内置透明的 ISO 7816-4 Command Chaining (`CLA |= 0x10`) 与 Response Chaining (`61 XX` 自动 `GET RESPONSE` 循环)，解决底层硬件 250 字节限制，实测完整通过 400+ 字节 PIV 证书、FIDO2 CBOR 数据及 OpenPGP 通信。
+> - **三启动入口**：`start_huada_unified.bat`（二合一自适应，默认接触优先）、`start_huada_contact.bat`（接触式独立位）、`start_huada_rf.bat`（非接触式独立位）。
 
 
 > **2026-10-13 握奇数据 (Watchdata) USB 读卡器原生支持更新**：
@@ -73,19 +78,21 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 
 ---
 
-## 💥 翻车事故实录：为什么华大 HD100 搞坏了？
+## 💥 翻车事故与完美逆袭：华大 HD-100 的“变砖”与“重生”
 
-在本项目逆向研发过程中，曾经有一台小巧漂亮的 **华大 HD-100** 双界面读卡器英勇“牺牲”：
-- **事故原因**：华大 HD100 在公开渠道没有任何 SDK 与开发头文件。在逆向摸索其私有 HID 协议时，作者对其通信控制字节进行了全空间盲扫（Fuzzing / Sweep）。
-- **悲剧发生**：不幸的是，该读卡器固件没有对底层特权指令做身份校验，盲扫指令直接触发了单片机内部的 Bootloader / ISP 固件擦除固化逻辑，导致读卡器内部固件损坏直接变砖，插入 USB 不再枚举识别。
-- **最新进展**：**大家不要慌，作者已经重新自费下单了新的华大 HD100，目前已经在快递路上！** 等新机器到货后，将使用更安全精细的静态反编译手段继续逆向，届时也会将 HD100 加入支持阵营！
+在本项目逆向研发早期，曾经有一台小巧漂亮的 **华大 HD-100** 双界面读卡器英勇“牺牲”：
+- **翻车教训**：早期华大 HD100 缺乏开发头文件。在摸索私有 HID 协议时对其通信字节进行了全空间盲扫（Fuzzing），直接触发了读卡器内部固件未做鉴权的 Bootloader 擦除逻辑，导致机器变砖无法枚举。
+- **绝地重生**：新购华大 HD-100（复合型带密码键盘与液晶屏，`VID_072F&PID_90D5`）到货后，我们改变策略：采用静态反编译结合官方安全协议栈（`SSSE32.dll`），彻底杜绝裸扫。
+- **核心难点攻克**：
+  1. **密码键盘安全设计解密**：该设备的数字键盘属于金融级 PIN Pad，日常闲置时硬件 MCU 完全锁定并禁止上报按键（杜绝系统木马盗取按键）；只有上位机下发 PIN 输入会话指令（`ICC_GetInputPass`）时才会开启安全键盘采样。
+  2. **硬件 250 字节 APDU 边界突破**：读卡器底层驱动存在 250 字节单次数据包硬件限制（超长会引发底层驱动溢出或固件报错）。我们在 Bridge 驱动层实现了透明的 **ISO 7816-4 Command Chaining (`CLA |= 0x10`)** 与 **Response Chaining (`61 XX` 自动循环拉取 `GET RESPONSE`)**，成功在实机上完整跑通 400+ 字节的 PIV 证书、FIDO2 CBOR 和 OpenPGP 会话！
 
 ---
 
 ## 🔮 下一步路线图 (Roadmap)
 
-1. **华大 HD100 双界面安全驱动**：已深入逆向分析官方 SDK（`SSSE32.dll`）中的多包接收与长 APDU 机制，掌握了防变砖保护策略与分片代理方案，待新机抵达后重新实机验证入库。
-2. **更多国产“免驱”型号适配**：欢迎卡友提 Issue 或寄送样机共同折腾！
+1. **更多国产“免驱”型号适配**：欢迎卡友提 Issue 或寄送退役样机共同折腾！
+2. **PIN Pad 硬件直输入模式扩展**：继续探索 PC/SC Part 10 原生 `FEATURE_VERIFY_PIN_DIRECT` 控制码与华大 PIN Pad 的无缝打通。
 
 ---
 
@@ -95,6 +102,9 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 
 | 启动脚本 (BAT) | 适用硬件型号 | 工作模式 | 核心特点与使用场景 |
 | :--- | :--- | :--- | :--- |
+| **`start_huada_unified.bat`** | 华大 HD-100 (`VID_072F&PID_90D5`) | 双界面自适应选择 | 默认接触优先，`-Priority RfFirst` 非接优先；内置 ISO 7816-4 命令/响应链式拆包拼装。 |
+| **`start_huada_rf.bat`** | 华大 HD-100 非接触射频区 | 固定非接触射频位 | 专用于挥非接卡/安全密钥，自动 ATS 转系统标准 ATR，完美兼容 FIDO2、PIV 与 WebAuthn。 |
+| **`start_huada_contact.bat`** | 华大 HD-100 接触式卡槽 | 固定接触 CPU 卡槽 | 专用于插卡，物理微动开关自动检测插拔状态，支持 T=0/T=1 CPU 卡与社保/银行芯片卡。 |
 | **`start_watchdata_unified.bat`** | 握奇 W2160 (W8298) / W5181 Plus | USB 接触+非接 自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；纯 Python 65 字节 HID 驱动，无需外部 DLL。已通过 FIDO2、PIV、OpenPGP、PBOC 验证。 |
 | **`start_watchdata_rf.bat`** | 握奇 W2160 (W8298) / W5181 Plus 非接区 | USB 固定非接触位 (`NAD=0x15`) | 独立非接触射频区，支持长响应自动多包拼接与 FIDO2 CTAP2 认证。 |
 | **`start_watchdata_contact.bat`** | 握奇 W2160 (W8298) / W5181 Plus 接触槽 | USB 固定接触位 (`NAD=0x12`) | 独立用户接触式卡槽，安全过滤内部 SAM。 |
@@ -114,6 +124,8 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 确保已安装并配置好 **BixVReader / VPCD**，设备管理器中已出现虚拟智能卡读卡器。
 
 ### 第二步：运行对应读卡器脚本
+- 如果你使用的是**华大 HD-100（带屏带密码键盘）**：
+  双击 **`start_huada_unified.bat`** 自动选择卡位；固定插卡使用 **`start_huada_contact.bat`**，固定挥卡使用 **`start_huada_rf.bat`**。
 - 如果你使用的是**握奇 USB 读卡器（四合一版 W2160 代号 W8298 / W5181 Plus）**：
   双击 **`start_watchdata_unified.bat`** 自动选择卡位；固定插卡使用 **`start_watchdata_contact.bat`**，固定挥卡使用 **`start_watchdata_rf.bat`**。
 - 如果你使用的是**握奇 W2160 串口版（老款纯非接 CRW-Xs）**：

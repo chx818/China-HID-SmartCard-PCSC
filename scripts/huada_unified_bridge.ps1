@@ -1,0 +1,33 @@
+# Huada HD-100 unified PC/SC bridge (Contact slot & Contactless RF pad)
+[CmdletBinding()]
+param(
+    [string]$VpcdHost = '127.0.0.1',
+    [ValidateRange(1,65535)][int]$VpcdPort = 35963,
+    [ValidateSet('ContactFirst','RfFirst')][string]$Priority = 'ContactFirst',
+    [ValidateSet('Auto','Contact','Rf')][string]$Mode = 'Auto',
+    [ValidateRange(0,86400)][int]$RunSeconds = 0
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+
+try {
+    if ([Environment]::Is64BitProcess) {
+        $x86 = Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+        if (!(Test-Path -LiteralPath $x86)) { throw '32-bit Windows PowerShell is required for SSSE32.dll' }
+        & $x86 -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -VpcdHost $VpcdHost -VpcdPort $VpcdPort -Priority $Priority -Mode $Mode -RunSeconds $RunSeconds
+        exit $LASTEXITCODE
+    }
+
+    $driverDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'drivers'
+    if (Test-Path $driverDir) {
+        $env:PATH = "$driverDir;$env:PATH"
+    }
+
+    Add-Type -Path (Join-Path $PSScriptRoot 'HuadaBridge.cs')
+    [ChinaHid.Runner]::Run($VpcdHost, $VpcdPort, $Mode, ($Priority -eq 'ContactFirst'), $RunSeconds)
+    exit 0
+} catch {
+    Write-Error -ErrorAction Continue $_
+    exit 1
+}
