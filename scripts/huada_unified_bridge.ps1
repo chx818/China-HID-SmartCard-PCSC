@@ -1,4 +1,4 @@
-# Huada HD-100 unified PC/SC bridge (Contact slot & Contactless RF pad)
+﻿# Huada HD-100 unified PC/SC bridge (Contact slot & Contactless RF pad)
 [CmdletBinding()]
 param(
     [string]$VpcdHost = '127.0.0.1',
@@ -20,12 +20,9 @@ try {
     }
 
     $driverDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'drivers'
-    if (Test-Path $driverDir) {
-        $env:PATH = "$driverDir;$env:PATH"
-    }
 
     Add-Type -Path (Join-Path $PSScriptRoot 'HuadaBridge.cs')
-    [ChinaHid.Runner]::Run($VpcdHost, $VpcdPort, $Mode, ($Priority -eq 'ContactFirst'), $RunSeconds)
+    [ChinaHid.Runner]::Run($driverDir, $VpcdHost, $VpcdPort, $Mode, ($Priority -eq 'ContactFirst'), $RunSeconds)
     exit 0
 } catch {
     Write-Error -ErrorAction Continue $_

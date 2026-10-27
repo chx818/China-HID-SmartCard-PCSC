@@ -3,11 +3,12 @@
 > 支持**华大集成 (Huada HD-100 带屏与密码键盘)**、**德卡 (DeCard T6 / T10)**、**飞天诚信 (Feitian SCR501 / ROCKEY 531)**、**北京握奇 (Watchdata W2160 四合一版 W8298 / W5181 Plus / 串口纯非接版 CRW-Xs)** 等设备，将私有协议秒变 Windows 标准系统智能卡读卡器！
 
 
-> **2026-10-21 华大集成 (Huada) HD-100 密码键盘液晶屏双界面读卡器深度适配与涅槃支持**：
+> **2026-10-27 华大集成 (Huada) HD-100 密码键盘液晶屏双界面读卡器深度适配与涅槃支持**：
 > - **全新实机逆向与安全加固**：彻底告别早期盲扫误触发 Bootloader 擦除的教训，采用基于官方安全协议栈（`SSSE32.dll`）的无损直驱，零风险、零破坏。
-> - **接触与非接双界面完整支持**：接触式插槽（ISO 7816）与非接触射频区（ISO 14443 Type A）自适应接入；接触卡槽支持物理微动开关自动检测插拔。
-> - **硬件级 250 字节 APDU 边界自动突破**：内置透明的 ISO 7816-4 Command Chaining (`CLA |= 0x10`) 与 Response Chaining (`61 XX` 自动 `GET RESPONSE` 循环)，解决底层硬件 250 字节限制，实测完整通过 400+ 字节 PIV 证书、FIDO2 CBOR 数据及 OpenPGP 通信。
-> - **三启动入口**：`start_huada_unified.bat`（二合一自适应，默认接触优先）、`start_huada_contact.bat`（接触式独立位）、`start_huada_rf.bat`（非接触式独立位）。
+> - **NXP 与复旦微 (FM175xx) 双硬件方案全通配**：针对市场上流通的早期 NXP 方案与新批次复旦微 FM175xx 方案两种硬件版本，实现了全自动自适应通配。早期 NXP 方案实机完整验证；复旦微方案经逆向定位官方动态库 `SSSE32.dll` 递归多帧接收漏洞（RVA `0xEA6B` 条件跳转 Bug），通过精准的单字节补丁（`0xEA6B`: `0x7C` $\to$ `0x75` / `JL` $\to$ `JNE`）彻底解决底层长响应截断崩溃，双版本均实现 100% 稳定运行！
+> - **接触与非接双界面完整支持**：接触式插槽（ISO 7816）与非接触射频区（ISO 14443 Type A）自适应接入；接触卡槽支持物理微动开关自动检测插拔，深度优化 T=0 / T=1 协议适配与断电/复位状态机。
+> - **FIDO2 / WebAuthn 会话上下文保持**：移除非必要的侵入式空闲轮询 APDU，避免在 JavaCard 上意外卸载已选中的 FIDO2 Applet（防止 Windows Hello 降级跳过 PIN 输入），实测完整支持长 APDU 交互、CTAP2 CBOR 编解码与硬件安全密钥认证。
+> - **三启动入口**：`start_huada_unified.bat`（二合一自适应，默认接触优先，支持 `-Priority RfFirst`）、`start_huada_contact.bat`（接触式独立位）、`start_huada_rf.bat`（非接触式独立位）。
 
 
 > **2026-10-13 握奇数据 (Watchdata) USB 读卡器原生支持更新**：
@@ -88,7 +89,8 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 - **绝地重生**：新购华大 HD-100（复合型带密码键盘与液晶屏，`VID_072F&PID_90D5`）到货后，我们改变策略：采用静态反编译结合官方安全协议栈（`SSSE32.dll`），彻底杜绝裸扫。
 - **核心难点攻克**：
   1. **密码键盘安全设计解密**：该设备的数字键盘属于金融级 PIN Pad，日常闲置时硬件 MCU 完全锁定并禁止上报按键（杜绝系统木马盗取按键）；只有上位机下发 PIN 输入会话指令（`ICC_GetInputPass`）时才会开启安全键盘采样。
-  2. **硬件 250 字节 APDU 边界突破**：读卡器底层驱动存在 250 字节单次数据包硬件限制（超长会引发底层驱动溢出或固件报错）。我们在 Bridge 驱动层实现了透明的 **ISO 7816-4 Command Chaining (`CLA |= 0x10`)** 与 **Response Chaining (`61 XX` 自动循环拉取 `GET RESPONSE`)**，成功在实机上完整跑通 400+ 字节的 PIV 证书、FIDO2 CBOR 和 OpenPGP 会话！
+  2. **NXP 与复旦微双版本全兼容 & 驱动单字节补丁突破**：市面上流通的华大 HD-100 存在早期 NXP 方案与新版复旦微 (FM175xx) 方案两代硬件。原厂动态库 `SSSE32.dll` 在处理复旦微硬件的非接多帧长响应时，因内部递归接收函数（RVA `0x1000AFF0`）在 `0xEA6B` 处的条件跳转判断缺陷（`JL` 误判导致未填入实际接收字节数并返回错误码 `-2`），会导致读卡器无限断联重试。我们通过逆向精确定位该缺陷，采用单字节二进制补丁（`0xEA6B`: `0x7C` $\to$ `0x75` / `JL` $\to$ `JNE`），彻底根治了多帧长响应拼包缺陷。目前无论较早的 NXP 方案还是新的复旦微方案，均能稳定接收数百字节的多帧长响应！
+  3. **FIDO2 / WebAuthn 会话上下文保持**：彻底移除了空闲探卡时发送非必要 APDU（如 `00 A4 04 00 00`）的逻辑，避免在 JavaCard 上重置选中的 FIDO2 Applet（防止 Windows Hello 降级跳过 PIN 输入），保证 FIDO2、PIV、OpenPGP 的多步骤认证流程完好顺畅。
 
 ---
 
@@ -104,8 +106,7 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 项目根目录下提供了针对不同场景的批处理脚本，各自特点与用途如下：
 
 | 启动脚本 (BAT) | 适用硬件型号 | 工作模式 | 核心特点与使用场景 |
-| :--- | :--- | :--- | :--- |
-| **`start_huada_unified.bat`** | 华大 HD-100 (`VID_072F&PID_90D5`) | 双界面自适应选择 | 默认接触优先，`-Priority RfFirst` 非接优先；内置 ISO 7816-4 命令/响应链式拆包拼装。 |
+| **`start_huada_unified.bat`** | 华大 HD-100 (`VID_072F&PID_90D5`) | 双界面自适应选择 | 默认接触优先，`-Priority RfFirst` 非接优先；通配 NXP 与复旦微 FM175xx 方案，内置长数据多帧拼包与非侵入式会话保持。 |
 | **`start_huada_rf.bat`** | 华大 HD-100 非接触射频区 | 固定非接触射频位 | 专用于挥非接卡/安全密钥，自动 ATS 转系统标准 ATR，完美兼容 FIDO2、PIV 与 WebAuthn。 |
 | **`start_huada_contact.bat`** | 华大 HD-100 接触式卡槽 | 固定接触 CPU 卡槽 | 专用于插卡，物理微动开关自动检测插拔状态，支持 T=0/T=1 CPU 卡与社保/银行芯片卡。 |
 | **`start_watchdata_unified.bat`** | 握奇 W2160 (W8298) / W5181 Plus | USB 接触+非接 自动选择 | 默认接触优先，`-Priority RfFirst` 非接优先；纯 Python 65 字节 HID 驱动，无需外部 DLL。已通过 FIDO2、PIV、OpenPGP、PBOC 验证。 |
