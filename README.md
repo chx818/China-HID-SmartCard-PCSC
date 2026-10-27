@@ -106,6 +106,7 @@ Windows 原生的智能卡基础设施（`WinSCard.dll` / `SCardSvr` 服务）**
 项目根目录下提供了针对不同场景的批处理脚本，各自特点与用途如下：
 
 | 启动脚本 (BAT) | 适用硬件型号 | 工作模式 | 核心特点与使用场景 |
+| :--- | :--- | :--- | :--- |
 | **`start_huada_unified.bat`** | 华大 HD-100 (`VID_072F&PID_90D5`) | 双界面自适应选择 | 默认接触优先，`-Priority RfFirst` 非接优先；通配 NXP 与复旦微 FM175xx 方案，内置长数据多帧拼包与非侵入式会话保持。 |
 | **`start_huada_rf.bat`** | 华大 HD-100 非接触射频区 | 固定非接触射频位 | 专用于挥非接卡/安全密钥，自动 ATS 转系统标准 ATR，完美兼容 FIDO2、PIV 与 WebAuthn。 |
 | **`start_huada_contact.bat`** | 华大 HD-100 接触式卡槽 | 固定接触 CPU 卡槽 | 专用于插卡，物理微动开关自动检测插拔状态，支持 T=0/T=1 CPU 卡与社保/银行芯片卡。 |
@@ -206,6 +207,10 @@ SmartCard-Bridges/
 ├── README.md                      # 项目说明文档
 ├── LICENSE                        # MIT 开源许可证
 │
+├── start_huada_unified.bat        # 🔥 华大 HD-100 接触+非接 二合一智能桥接
+├── start_huada_rf.bat             # 华大 HD-100 非接触 (RF) 独立桥接
+├── start_huada_contact.bat        # 华大 HD-100 接触式卡槽独立桥接
+│
 ├── start_watchdata_unified.bat    # 🔥 握奇 W2160(W8298)/W5181 Plus 接触+非接 自动桥接
 ├── start_watchdata_rf.bat         # 握奇 USB 系列非接触 (RF) 独立桥接
 ├── start_watchdata_contact.bat    # 握奇 USB 系列接触式卡槽独立桥接
@@ -230,7 +235,15 @@ SmartCard-Bridges/
 │   ├── serial_reader.py           # 串口 CRW-X 读卡器状态机
 │   └── serial_transport.py        # Windows RS-232 串口驱动
 │
+├── for MAC/                       # macOS 跨平台驱动与测试套件
+│   ├── README.md                  # macOS 安装与使用指南
+│   ├── start_decard_mac.sh        # macOS 德卡双界面桥接
+│   ├── start_decard_contact_mac.sh # macOS 德卡接触槽桥接
+│   ├── start_feitian_mac.sh       # macOS 飞天 SCR501 桥接
+│   └── scripts/                   # macOS Python 驱动与中继脚本
+│
 ├── drivers/                       # 提取的官方驱动原生 DLL 与 C 语言头文件
+│   ├── SSSE32.dll                 # 华大 HD-100 原生动态库 (已打入 0xEA6B 多帧接收补丁, x86)
 │   ├── dcic32.dll                 # 德卡接触式 IC 动态库 (x86)
 │   ├── dcic32.h
 │   ├── dcic32.lib
@@ -239,16 +252,21 @@ SmartCard-Bridges/
 │   ├── dcrfrd.dll                 # 德卡非接触 RF 动态库 (x64)
 │   └── RK501API.dll               # 飞天诚信 SCR501 动态库 (x86)
 │
-├── scripts/                       # 核心业务逻辑脚本 (PowerShell / Python)
+├── scripts/                       # 核心业务逻辑脚本 (PowerShell / C# / Python)
+│   ├── HuadaBridge.cs             # 华大 HD-100 C# 核心桥接与协议中继器
+│   ├── huada_unified_bridge.ps1   # 华大 HD-100 二合一中继入口
+│   ├── huada_rf_bridge.ps1        # 华大 HD-100 非接独立中继
+│   ├── huada_contact_bridge.ps1   # 华大 HD-100 接触独立中继
+│   ├── DecardBridge.cs            # 德卡 T6/T10 C# 核心桥接与协议中继器
+│   ├── decard_unified_bridge.ps1  # 德卡接触/非接 二合一中继逻辑
+│   ├── decard_rf_bridge.ps1       # 德卡非接独立中继逻辑
+│   ├── decard_contact_bridge.ps1  # 德卡接触式独立中继逻辑 (T6 / T10 通用)
 │   ├── watchdata_unified_bridge.ps1 # 握奇 USB 二合一中继入口
-│   ├── watchdata_rf_bridge.ps1      # 握奇 USB 非接独立中继
+│   ├── watchdata_rf_bridge.ps1    # 握奇 USB 非接独立中继
 │   ├── watchdata_contact_bridge.ps1 # 握奇 USB 接触独立中继
-│   ├── watchdata_usb_bridge.py      # 握奇 USB Python 核心中继
-│   ├── w2160_serial_bridge.ps1      # 握奇 W2160 串口版中继入口
-│   ├── decard_unified_bridge.ps1    # 德卡接触/非接 二合一中继逻辑
-│   ├── decard_rf_bridge.ps1         # 德卡非接独立中继逻辑
-│   ├── decard_contact_bridge.ps1    # 德卡接触式独立中继逻辑 (T6 / T10 通用)
-│   └── feitian_scr501_bridge.ps1    # 飞天 SCR501 独立中继逻辑
+│   ├── watchdata_usb_bridge.py    # 握奇 USB Python 核心中继
+│   ├── w2160_serial_bridge.ps1    # 握奇 W2160 串口版中继入口
+│   └── feitian_scr501_bridge.ps1  # 飞天 SCR501 独立中继逻辑
 │
 └── tools/                         # 协议分析逆向与辅助工具
     ├── DeCardReader.cs            # 德卡 C# 完整 P/Invoke 接口封装参考
@@ -261,4 +279,4 @@ SmartCard-Bridges/
 ## 📄 开源许可证
 
 本项目核心源码以 [MIT 许可证](LICENSE) 开源，欢迎社区卡友共同完善与提交 PR！  
-所包含的官方驱动动态库（`dcic32.dll`、`RK501API.dll` 等）版权归各自原厂商所有。本项目仅做技术研究与协议中继桥接之用。
+所包含的官方驱动动态库（`SSSE32.dll`、`dcic32.dll`、`RK501API.dll` 等）版权归各自原厂商所有。本项目仅做技术研究与协议中继桥接之用。
