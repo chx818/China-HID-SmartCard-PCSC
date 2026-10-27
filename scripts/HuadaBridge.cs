@@ -150,6 +150,79 @@ namespace ChinaHid {
 
             return r;
         }
+
+        /// <summary>
+        /// Contactless RF transmission: passes APDUs to the card.
+        /// If command is long (Lc > 240), chunks with ISO 7816-4 command chaining (CLA | 0x10)
+        /// to stay within SSSE32.dll's stack buffer limit (~290 bytes).
+        /// Does NOT assemble 61 XX: raw responses (including 61 XX status) are returned
+        /// directly to Windows PC/SC for native GET RESPONSE dispatch.
+        /// </summary>
+        public static byte[] TransmitRf(Func<byte[], byte[]> rawExchange, byte[] command) {
+            if (!Valid(command)) return Status(0x67, 0x00);
+
+            byte cla = command[0];
+            byte ins = command[1];
+            byte p1 = command[2];
+            byte p2 = command[3];
+
+            int lc = 0;
+            int dataOffset = 0;
+            bool hasLe = false;
+            byte le = 0;
+
+            if (command.Length > 7 && command[4] == 0) {
+                // Extended APDU Case 3E or 4E
+                lc = (command[5] << 8) | command[6];
+                dataOffset = 7;
+                if (command.Length == 9 + lc) {
+                    hasLe = true;
+                    le = command[command.Length - 1];
+                }
+            } else if (command.Length > 5 && command[4] != 0) {
+                // Short APDU Case 3S or 4S
+                lc = command[4];
+                dataOffset = 5;
+                if (command.Length == 6 + lc) {
+                    hasLe = true;
+                    le = command[command.Length - 1];
+                }
+            }
+
+            if (lc > 240) {
+                byte[] r = null;
+                int sent = 0;
+                while (sent < lc) {
+                    int chunkSize = Math.Min(240, lc - sent);
+                    bool isLast = (sent + chunkSize == lc);
+                    byte chunkCla = isLast ? cla : (byte)(cla | 0x10);
+
+                    int frameLen = 5 + chunkSize + (isLast && hasLe ? 1 : 0);
+                    byte[] chunkFrame = new byte[frameLen];
+                    chunkFrame[0] = chunkCla;
+                    chunkFrame[1] = ins;
+                    chunkFrame[2] = p1;
+                    chunkFrame[3] = p2;
+                    chunkFrame[4] = (byte)chunkSize;
+                    Array.Copy(command, dataOffset + sent, chunkFrame, 5, chunkSize);
+                    if (isLast && hasLe) chunkFrame[frameLen - 1] = le;
+
+                    r = Checked(rawExchange(chunkFrame));
+                    sent += chunkSize;
+
+                    if (!isLast) {
+                        byte sw1 = r[r.Length - 2];
+                        byte sw2 = r[r.Length - 1];
+                        if (sw1 != 0x90 || sw2 != 0x00) {
+                            return r;
+                        }
+                    }
+                }
+                return r;
+            } else {
+                return Checked(rawExchange(command));
+            }
+        }
     }
 
     public sealed class Ats {
@@ -321,19 +394,30 @@ namespace ChinaHid {
 
         private bool TryActivateRf() {
             Native.PICC_Reader_RFControl(handle, 1);
+            Thread.Sleep(30); // Allow RF field to settle and card power to stabilize
             Native.PICC_Reader_SetTypeA(handle);
+
             int req = Native.PICC_Reader_Request(handle);
-            if (req != 0) return false;
+            if (req != 0) {
+                Thread.Sleep(20);
+                req = Native.PICC_Reader_Request(handle);
+                if (req != 0) return false;
+            }
 
             byte[] uid = new byte[10];
             int anticoll = Native.PICC_Reader_anticoll(handle, uid);
             if (anticoll != 0) return false;
 
             int sel = Native.PICC_Reader_Select(handle, 0x41);
+            if (sel != 0) sel = Native.PICC_Reader_Select(handle, 0x00);
             if (sel != 0) return false;
 
             byte[] ats = new byte[64];
             int atsLen = Native.PICC_Reader_PowerOnTypeA(handle, ats);
+            if (atsLen <= 0) {
+                Thread.Sleep(25);
+                atsLen = Native.PICC_Reader_PowerOnTypeA(handle, ats);
+            }
             if (atsLen > 0) {
                 Ats parsed = Ats.Parse(Apdu.Slice(ats, 0, atsLen));
                 Atr = parsed.Atr;
@@ -351,15 +435,10 @@ namespace ChinaHid {
 
         public bool RfPresent() {
             if (handle <= 0 || Medium != "Rf") return false;
-            byte[] probe = new byte[] { 0x02 };
-            byte[] resp = new byte[16];
-            int rLen = Native.PICC_Reader_Application(handle, 1, probe, resp);
-            if (rLen >= 2) return true;
-
-            // 40ms retry to filter transient RF noise
-            Thread.Sleep(40);
-            rLen = Native.PICC_Reader_Application(handle, 1, probe, resp);
-            return rLen >= 2;
+            // No intrusive APDU probing during session:
+            // injecting APDUs (e.g. 00 A4 04 00 00) deselects the active applet (e.g. FIDO2)
+            // and resets transaction state. Card loss is detected on APDU transmission or reset.
+            return true;
         }
 
         public void Reset() {
@@ -371,6 +450,8 @@ namespace ChinaHid {
                 if (len > 0) Atr = Apdu.Slice(resp, 0, len);
                 else throw new LinkException("Contact reset failed");
             } else if (Medium == "Rf") {
+                Native.PICC_Reader_RFControl(handle, 0);
+                Thread.Sleep(30);
                 if (!TryActivateRf()) throw new LinkException("RF reset failed");
             }
         }
@@ -390,15 +471,26 @@ namespace ChinaHid {
             if (handle <= 0) throw new LinkException("Reader handle closed");
 
             if (Medium == "Rf") {
-                return Apdu.TransmitWithChaining(cmd => {
-                    byte[] resp = new byte[512];
+                return Apdu.TransmitRf(cmd => {
+                    byte[] resp = new byte[2048];
                     int rLen = Native.PICC_Reader_Application(handle, cmd.Length, cmd, resp);
+                    if (rLen <= 0) {
+                        // Resilient recovery: if response buffer has valid SW trailer, recover length
+                        if (resp[0] != 0 || resp[1] != 0) {
+                            for (int i = 2; i < 512; i++) {
+                                if (resp[i] == 0x90 && resp[i + 1] == 0x00 && (i + 2 >= 512 || (resp[i + 2] == 0 && resp[i + 3] == 0))) {
+                                    rLen = i + 2;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     if (rLen <= 0) throw new LinkException("RF PICC_Reader_Application failed: " + rLen);
                     return Apdu.Slice(resp, 0, rLen);
                 }, apdu);
             } else if (Medium == "Contact") {
                 return Apdu.TransmitWithChaining(cmd => {
-                    byte[] resp = new byte[512];
+                    byte[] resp = new byte[2048];
                     int rLen = Native.ICC_Reader_Application(handle, 1, cmd.Length, cmd, resp);
                     if (rLen <= 0) throw new LinkException("Contact ICC_Reader_Application failed: " + rLen);
                     return Apdu.Slice(resp, 0, rLen);
@@ -564,9 +656,17 @@ namespace ChinaHid {
                         trace.Begin("reading host frame");
                         byte[] payload = Framing.Read(stream, frameTimeout);
                         trace.Request(payload);
+                        if (payload.Length > 1) {
+                            Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] APDU In:  " + BitConverter.ToString(payload));
+                        }
                         byte[] response = Handle(payload);
                         trace.Begin("sending response");
-                        if (response != null) Framing.Write(stream, response);
+                        if (response != null) {
+                            Framing.Write(stream, response);
+                            if (payload.Length > 1) {
+                                Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] APDU Out: " + BitConverter.ToString(response));
+                            }
+                        }
                         trace.Complete(response);
                         if (payload.Length != 1 || payload[0] != 4) idle.Restart();
                     }
@@ -579,16 +679,6 @@ namespace ChinaHid {
                         }
                         trace.PollDone();
                         contactPoll.Restart();
-                    }
-
-                    if (card.Medium == "Rf" && idle.ElapsedMilliseconds >= RfQuietMs && rfPoll.ElapsedMilliseconds >= RfIdlePollMs && !stream.DataAvailable) {
-                        trace.Begin("RF presence check");
-                        if (!card.RfPresent()) {
-                            trace.FailureKind = "rf-absent";
-                            throw new LinkException("RF card removed");
-                        }
-                        trace.PollDone();
-                        rfPoll.Restart();
                     }
                 }
             } catch (Exception ex) {
